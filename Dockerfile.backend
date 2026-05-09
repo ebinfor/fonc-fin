@@ -1,0 +1,68 @@
+# FONCIER+ v1.0.9 — Dockerfile Backend
+# Multi-stage pour image minimale (~200 MB)
+# Compatible monolithique ET microservices (FONCIER_SERVICE + FONCIER_MODULES)
+
+# ── Stage 1 : Builder ──────────────────────────────────────────
+FROM python:3.12-slim AS builder
+
+WORKDIR /build
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Dépendances système pour psycopg2 / PostGIS
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc libpq-dev libgeos-dev libproj-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Requirements
+COPY backend/requirements.txt .
+RUN pip install --prefix=/install -r requirements.txt
+
+# ── Stage 2 : Runtime ─────────────────────────────────────────
+FROM python:3.12-slim
+
+WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app \
+    PORT=8000
+
+# Runtime libs uniquement
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 libgeos3.12.0 libproj25 curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && addgroup --system foncier \
+    && adduser  --system --ingroup foncier --no-create-home foncier
+
+# Copier les packages installés
+COPY --from=builder /install /usr/local
+
+# Code applicatif
+COPY backend/ /app/
+
+# Migrations (référence, exécutées via alembic upgrade head)
+COPY migrations/ /app/migrations/
+
+# Chown non-root
+RUN chown -R foncier:foncier /app
+USER foncier
+
+EXPOSE 8000
+
+# Health check interne
+HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \
+    CMD curl -sf http://localhost:8000/health/live || exit 1
+
+# Entrypoint : uvicorn avec nombre de workers configurables
+CMD ["sh", "-c", \
+     "uvicorn app.main:app \
+      --host 0.0.0.0 \
+      --port 8000 \
+      --workers ${UVICORN_WORKERS:-2} \
+      --loop uvloop \
+      --http httptools \
+      --access-log \
+      --proxy-headers \
+      --forwarded-allow-ips='*'"]

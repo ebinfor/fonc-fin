@@ -1,0 +1,393 @@
+# FONCIER+ v1.0.9 — Architecture Microservices (7 services + Gateway)
+# =====================================================================
+# Principe : monolithique découpé en 7 bounded contexts
+# Règle : chaque service a son propre processus + port interne
+# Toutes les règles métier (WF30, CCFM, Conflits, Audit) INCHANGÉES
+#
+# 7 services métier :
+#   svc-dar         : DAR + Migration archives (WF30)
+#   svc-parcel      : SIG cadastral (BGU/PostGIS)
+#   svc-legal       : RNAF + JO + Notaire + Domaine
+#   svc-workflow    : Workflow Engine 30
+#   svc-alert       : Alertes + Monitoring + Risk
+#   svc-conflict    : Détection conflits (PostGIS intelligent)
+#   svc-audit       : Audit immuable + Admin
+#   svc-cert        : Certification CCFM (moteur juridique)
+#   api-gateway     : Auth + Routing + Rate limiting
+#
+# Chaque service "svc-*" partage la MÊME base de code FastAPI
+# mais démarre avec une variable FONCIER_SERVICE qui active
+# uniquement les routers qui lui appartiennent.
+
+version: "3.9"
+
+# ── Réseau interne ─────────────────────────────────────────────
+networks:
+  foncier-internal:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+# ── Volumes persistants ────────────────────────────────────────
+volumes:
+  foncier_pgdata:
+  foncier_redis:
+  foncier_minio:
+  foncier_backups:
+
+# ── Configuration commune réutilisée (YAML anchors) ───────────
+x-backend-common: &backend-common
+  image: foncier-backend:${VERSION:-latest}
+  build:
+    context: .
+    dockerfile: Dockerfile.backend
+  restart: unless-stopped
+  networks:
+    - foncier-internal
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  environment:
+    DATABASE_URL:    postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    REDIS_URL:       redis://:${REDIS_PASSWORD}@redis:6379/0
+    JWT_SECRET:      ${JWT_SECRET}
+    MINIO_ENDPOINT:  minio:9000
+    MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+    MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+    SENTRY_DSN:      ${SENTRY_DSN:-}
+    ENV:             production
+  healthcheck:
+    test: ["CMD-SHELL", "curl -sf http://localhost:8000/health/live || exit 1"]
+    interval: 15s
+    timeout: 5s
+    retries: 3
+    start_period: 20s
+
+services:
+
+  # ══════════════════════════════════════════════════════════════
+  # INFRASTRUCTURE
+  # ══════════════════════════════════════════════════════════════
+
+  postgres:
+    image: postgis/postgis:16-3.4
+    restart: unless-stopped
+    networks:
+      - foncier-internal
+    environment:
+      POSTGRES_DB:       ${POSTGRES_DB}
+      POSTGRES_USER:     ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - foncier_pgdata:/var/lib/postgresql/data
+      - ./config/postgresql/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./scripts/init-db.sh:/docker-entrypoint-initdb.d/01-init.sh:ro
+    command: >
+      postgres
+      -c max_connections=200
+      -c shared_buffers=512MB
+      -c effective_cache_size=2GB
+      -c work_mem=16MB
+      -c maintenance_work_mem=128MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    expose: ["5432"]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    networks:
+      - foncier-internal
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD}
+      --appendonly yes
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --save 900 1
+      --save 300 10
+    volumes:
+      - foncier_redis:/data
+    expose: ["6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "--pass", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    networks:
+      - foncier-internal
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER:     ${MINIO_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY}
+    volumes:
+      - foncier_minio:/data
+    expose: ["9000", "9001"]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ══════════════════════════════════════════════════════════════
+  # API GATEWAY — Authentification + Routage + Rate limiting
+  # ══════════════════════════════════════════════════════════════
+
+  api-gateway:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    networks:
+      - foncier-internal
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./config/nginx/gateway.conf:/etc/nginx/nginx.conf:ro
+      - ./config/nginx/upstreams.conf:/etc/nginx/conf.d/upstreams.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      svc-dar:       { condition: service_healthy }
+      svc-parcel:    { condition: service_healthy }
+      svc-legal:     { condition: service_healthy }
+      svc-workflow:  { condition: service_healthy }
+      svc-alert:     { condition: service_healthy }
+      svc-conflict:  { condition: service_healthy }
+      svc-audit:     { condition: service_healthy }
+      svc-cert:      { condition: service_healthy }
+
+  # ══════════════════════════════════════════════════════════════
+  # SERVICE 1 — DAR  (Migration archives + WF30 DAR side)
+  # Responsable : ingestion, OCR, structuration, classification
+  # Endpoints   : /v1/annf/* + /v1/wf30/*
+  # ══════════════════════════════════════════════════════════════
+
+  svc-dar:
+    <<: *backend-common
+    expose: ["8000"]
+    environment:
+      <<: *backend-common
+      FONCIER_SERVICE:  "dar"
+      FONCIER_MODULES:  "annf,wf30"
+      UVICORN_WORKERS:  "2"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+    labels:
+      foncier.service: "dar"
+      foncier.version: "${VERSION:-latest}"
+
+  # ══════════════════════════════════════════════════════════════
+  # SERVICE 2 — PARCEL SIG  (Cadastre + BGU + PostGIS)
+  # Responsable : géométrie, surfaces, overlap, numérotation
+  # Endpoints   : /v1/bgu/* + /v1/cadastre/* + /v1/rnp/*
+  # ══════════════════════════════════════════════════════════════
+
+  svc-parcel:
+    <<: *backend-common
+    expose: ["8000"]
+    environment:
+      <<: *backend-common
+      FONCIER_SERVICE:  "parcel"
+      FONCIER_MODULES:  "bgu,cadastre,cadastre_parcellaire,rnp,droits_fonciers"
+      UVICORN_WORKERS:  "3"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.00"
+          memory: 1G
+    labels:
+      foncier.service: "parcel"
+
+  # ══════════════════════════════════════════════════════════════
+  # SERVICE 3 — LEGAL  (RNAF + JO + Notaire + Domaine + Commune)
+  # Responsable : arrêtés, JO, titres fonciers, notaires
+  # Endpoints   : /v1/rnaf/* + /v1/jo/* + /v1/notaire/* +
+  #               /v1/domaine/* + /v1/commune/* + /v1/urbanisme/*
+  # ══════════════════════════════════════════════════════════════
+
+  svc-legal:
+    <<: *backend-common
+    expose: ["8000"]
+    environment:
+      <<: *backend-common
+      FONCIER_SERVICE:  "legal"
+      FONCIER_MODULES:  "rnaf,journal_officiel,notaire,domaine,commune,urbanisme,banque"
+      UVICORN_WORKERS:  "3"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.00"
+          memory: 768M
+    labels:
+      foncier.service: "legal"
+
+  # ══════════════════════════════════════════════════════════════
+  # SERVICE 4 — WORKFLOW  (Engine 30 + orchestration)
+  # Responsable : orchestration étapes, validation séquentielle,
+  #               blocage automatique, progression contrôlée
+  # Endpoints   : /v1/workflows/* + /api/v3/ccfm/workspaces/*
+  # RÈGLE ABSOLUE : logique WF30 NON MODIFIABLE
+  # ══════════════════════════════════════════════════════════════
+
+  svc-workflow:
+    <<: *backend-common
+    expose: ["8000"]
+    environment:
+      <<: *backend-common
+      FONCIER_SERVICE:  "workflow"
+      FONCIER_MODULES:  "workflows,espace_travail"
+      UVICORN_WORKERS:  "2"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+    labels:
+      foncier.service: "workflow"
+
+  # ══════════════════════════════════════════════════════════════
+  # SERVICE 5 — ALERT  (Monitoring + Risk + Dashboard + Alertes)
+  # Responsable : alertes critiques, notifications, monitoring
+  # Endpoints   : /api/v1/monitoring/* + /api/v1/risk/* +
+  #               /api/v1/dashboard/* + /api/v1/simulation/*
+  # ══════════════════════════════════════════════════════════════
+
+  svc-alert:
+    <<: *backend-common
+    expose: ["8000"]
+    environment:
+      <<: *backend-common
+      FONCIER_SERVICE:  "alert"
+      FONCIER_MODULES:  "monitoring,risk,dashboard"
+      UVICORN_WORKERS:  "2"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.75"
+          memory: 768M
+    labels:
+      foncier.service: "alert"
+
+  # ══════════════════════════════════════════════════════════════
+  # SERVICE 6 — CONFLICT  (Détection conflits + Justice)
+  # Responsable : chevauchements, incohérences géométriques,
+  #               conflits propriétaires, zones litigieuses
+  # Endpoints   : /v1/justice/* (conflit foncier)
+  # ══════════════════════════════════════════════════════════════
+
+  svc-conflict:
+    <<: *backend-common
+    expose: ["8000"]
+    environment:
+      <<: *backend-common
+      FONCIER_SERVICE:  "conflict"
+      FONCIER_MODULES:  "justice"
+      UVICORN_WORKERS:  "2"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.75"
+          memory: 512M
+    labels:
+      foncier.service: "conflict"
+
+  # ══════════════════════════════════════════════════════════════
+  # SERVICE 7 — AUDIT  (Journal immuable + Admin + Sécurité)
+  # Responsable : journalisation complète, traçabilité,
+  #               hash sécurité, historique non modifiable
+  # Endpoints   : /v1/admin/* + /verify/*
+  # RÈGLE ABSOLUE : audit_immutable NON MODIFIABLE
+  # ══════════════════════════════════════════════════════════════
+
+  svc-audit:
+    <<: *backend-common
+    expose: ["8000"]
+    environment:
+      <<: *backend-common
+      FONCIER_SERVICE:  "audit"
+      FONCIER_MODULES:  "admin,portail_public"
+      UVICORN_WORKERS:  "2"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+    labels:
+      foncier.service: "audit"
+
+  # ══════════════════════════════════════════════════════════════
+  # SERVICE 8 — CERTIFICATION CCFM  (Moteur juridique)
+  # Responsable : validation finale, contrôle juridique global,
+  #               émission certificat, verrouillage données
+  # Endpoints   : /v1/ccfm/* + /api/v3/ccfm/* + /v1/auth/* + /v1/users/*
+  # RÈGLE ABSOLUE : logique CCFM NON MODIFIABLE
+  # ══════════════════════════════════════════════════════════════
+
+  svc-cert:
+    <<: *backend-common
+    expose: ["8000"]
+    environment:
+      <<: *backend-common
+      FONCIER_SERVICE:  "cert"
+      FONCIER_MODULES:  "ccfm,ccfm_v3,auth,users"
+      UVICORN_WORKERS:  "2"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.75"
+          memory: 512M
+    labels:
+      foncier.service: "cert"
+
+  # ══════════════════════════════════════════════════════════════
+  # FRONTEND
+  # ══════════════════════════════════════════════════════════════
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    restart: unless-stopped
+    networks:
+      - foncier-internal
+    expose: ["80"]
+    depends_on:
+      - api-gateway
+
+  # ══════════════════════════════════════════════════════════════
+  # DB BACKUP
+  # ══════════════════════════════════════════════════════════════
+
+  db-backup:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    networks:
+      - foncier-internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST:     postgres
+      PGUSER:     ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB}
+    volumes:
+      - foncier_backups:/backups
+      - ./scripts/backup.sh:/backup.sh:ro
+    entrypoint: ["/bin/sh", "-c", "while :; do /backup.sh; sleep 86400; done"]
