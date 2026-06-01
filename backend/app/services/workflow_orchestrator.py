@@ -246,6 +246,60 @@ class RNAFWorkflowService:
             wf.date_verification = now
             wf.verifie_par = acteur_id
 
+        # ─── Coordination avec WorkflowEngine ─────────────────────────────────
+        from app.services.workflow_engine import WorkflowEngine
+        from app.models.workflow_engine import WorkflowInstance, StatutInstance
+        from app.models.auth import User
+        
+        # Récupérer l'utilisateur pour connaître son rôle
+        user_res = await db.execute(select(User).where(User.id == uuid.UUID(acteur_id) if isinstance(acteur_id, str) else acteur_id))
+        user = user_res.scalar_one_or_none()
+        role = user.role if user else "ADMIN"
+
+        # Récupérer l'instance existante ou la démarrer
+        inst_res = await db.execute(
+            select(WorkflowInstance).where(
+                and_(
+                    WorkflowInstance.entite_id == str(wf.rnaf_id),
+                    WorkflowInstance.entite_type == "rnaf"
+                )
+            )
+        )
+        instance = inst_res.scalar_one_or_none()
+        if not instance:
+            instance = await WorkflowEngine.demarrer(
+                db=db,
+                type_workflow="RNAF",
+                entite_type="rnaf",
+                entite_id=str(wf.rnaf_id),
+                demarre_par_id=acteur_id,
+            )
+
+        # Déterminer s'il s'agit d'un rejet/retour en arrière
+        is_rejet = False
+        if (ancien_statut == StatutRNAF.EN_VERIFICATION and nouveau_statut == StatutRNAF.BROUILLON) or \
+           (ancien_statut == StatutRNAF.EN_SCELLEMENT and nouveau_statut == StatutRNAF.EN_VERIFICATION):
+            is_rejet = True
+
+        if is_rejet:
+            await WorkflowEngine.rejeter_etape(
+                db=db,
+                instance_id=instance.id,
+                acteur_id=acteur_id,
+                role=role,
+                motif=motif or "Retour à l'étape précédente",
+            )
+        else:
+            # Avancement (validation)
+            await WorkflowEngine.valider_etape(
+                db=db,
+                instance_id=instance.id,
+                acteur_id=acteur_id,
+                role=role,
+                commentaire=motif or f"Transition vers {nouveau_statut.value}",
+                snapshot_entite={"rnaf_id": str(wf.rnaf_id), "statut": nouveau_statut.value}
+            )
+
         await db.flush()
         # Note : le trigger tg_sync_rnp_from_rnaf se déclenche automatiquement
         # et synchronise les RNP liés + BGU statuts
@@ -294,6 +348,26 @@ class RNAFWorkflowService:
         wf.suspendu_par = emis_par
         wf.updated_at = datetime.now(timezone.utc)
         await db.flush()
+
+        # Coordonner avec WorkflowEngine.suspendre
+        from app.services.workflow_engine import WorkflowEngine
+        from app.models.workflow_engine import WorkflowInstance
+        inst_res = await db.execute(
+            select(WorkflowInstance).where(
+                and_(
+                    WorkflowInstance.entite_id == str(wf.rnaf_id),
+                    WorkflowInstance.entite_type == "rnaf"
+                )
+            )
+        )
+        instance = inst_res.scalar_one_or_none()
+        if instance:
+            await WorkflowEngine.suspendre(
+                db=db,
+                instance_id=instance.id,
+                acteur_id=emis_par,
+                motif=motif,
+            )
 
         return wf, suspension
 

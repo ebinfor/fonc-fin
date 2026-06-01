@@ -110,7 +110,15 @@ class NicadService:
         """
         Génère le prochain code parcelle disponible pour un îlot.
         Format alphabétique : A1, A2, ..., Z9, AA1, etc.
+        Verrouille l'îlot de manière pessimiste (FOR UPDATE) pour éviter toute race condition.
         """
+        from sqlalchemy import text
+        # Verrouiller pessimistement l'îlot
+        await db.execute(
+            text("SELECT id FROM ilots WHERE id = :ilot_id FOR UPDATE"),
+            {"ilot_id": ilot_id}
+        )
+
         result = await db.execute(
             select(func.count(Parcelle.id))
             .join(Ilot)

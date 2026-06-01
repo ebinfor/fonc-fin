@@ -30,11 +30,11 @@ _MODULE_REGISTRY = {
     "admin":                 ("app.api.v1.endpoints.admin",            "/v1"),
 
     # ── Chaîne foncière ───────────────────────────────────────
-    "rnaf"  # Sous-module Urbanisme → /v1/urbanisme/rnaf/*:                  ("app.api.v1.endpoints.rnaf",             "/v1"),
+    "rnaf":                  ("app.api.v1.endpoints.rnaf",             "/v1"), # Sous-module Urbanisme → /v1/urbanisme/rnaf/*
     "journal_officiel":      ("app.api.v1.endpoints.journal_officiel", "/v1"),
     "cadastre":              ("app.api.v1.endpoints.cadastre",         "/v1"),
     "cadastre_parcellaire":  ("app.api.v1.endpoints.cadastre_parcellaire", "/v1"),
-    "rnp"   # Sous-module Cadastre  → /v1/cadastre/rnp/*:                   ("app.api.v1.endpoints.rnp",              "/v1"),
+    "rnp":                   ("app.api.v1.endpoints.rnp",              "/v1"), # Sous-module Cadastre  → /v1/cadastre/rnp/*
     "bgu":                   ("app.api.v1.endpoints.bgu",              "/v1"),
     "ccfm":                  ("app.api.v1.endpoints.ccfm",             "/v1"),
 

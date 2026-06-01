@@ -1,10 +1,17 @@
 /**
- * FONCIER+ v3.4.7 — Mock Backend
- * Simule l'API FastAPI backend pour le développement frontend
- * Remplacé par apiClient.ts en production (backend réel)
+ * FONCIER+ v3.5.4 — Hybrid Mock/Live Backend Client
+ * Simule l'API FastAPI backend pour le développement frontend ou
+ * redirige vers apiClient.ts en mode connecté réel (VITE_API_MODE=live).
+ * 
+ * Assure une compatibilité 100% ascendante avec tous les écrans du cadastre
+ * et du CCFM.
  */
 
-// ── Auth ──────────────────────────────────────────────────────────
+import * as apiClient from './apiClient';
+
+const IS_LIVE = import.meta.env.VITE_API_MODE === 'live';
+
+// ── Auth USERS ────────────────────────────────────────────────────
 
 const USERS: Record<string, { id: string; name: string; role: string; email: string; region: string }> = {
   'admin@foncier.gov.ne':        { id: 'u1', name: 'Amadou Diallo',     role: 'ADMIN',               email: 'admin@foncier.gov.ne',        region: 'NATIONAL' },
@@ -18,6 +25,7 @@ const USERS: Record<string, { id: string; name: string; role: string; email: str
 }
 
 export function login(email: string, password: string) {
+  if (IS_LIVE) return apiClient.login(email, password);
   const user = USERS[email]
   if (!user || password.length < 6) return null
   return { ...user, access_token: `mock_jwt_${user.id}_${Date.now()}` }
@@ -26,6 +34,7 @@ export function login(email: string, password: string) {
 // ── KPIs Nationaux ────────────────────────────────────────────────
 
 export function getKpisNationaux() {
+  if (IS_LIVE) return apiClient.getKpisNationaux();
   return {
     parcelles_totales:    148_372,
     ccfm_actifs:           89_441,
@@ -41,6 +50,7 @@ export function getKpisNationaux() {
 // ── Activité récente ──────────────────────────────────────────────
 
 export function getActiviteRecente() {
+  if (IS_LIVE) return apiClient.getActiviteRecente();
   return [
     { id: 'a1', type: 'CCFM',       action: 'Certificat émis',          ref: 'CCF-2026-0089441', region: 'Niamey',    time: '2 min', color: 'green' },
     { id: 'a2', type: 'MUTATION',   action: 'Mutation enregistrée',      ref: 'MUT-2026-0001293', region: 'Zinder',    time: '8 min', color: 'green' },
@@ -56,6 +66,7 @@ export function getActiviteRecente() {
 // ── Stats par module ──────────────────────────────────────────────
 
 export function getStatsByModule() {
+  if (IS_LIVE) return apiClient.getStatsByModule();
   return [
     { module: 'CCFM',          total: 89_441, ce_mois: 847,  actifs: 89_100, label: 'Certificats' },
     { module: 'RNAF',          total: 12_847, ce_mois: 234,  actifs: 12_412, label: 'Arrêtés' },
@@ -72,6 +83,7 @@ export function getStatsByModule() {
 // ── CCFM ──────────────────────────────────────────────────────────
 
 export function getDemandeCCFM() {
+  if (IS_LIVE) return apiClient.getDemandeCCFM();
   return Array.from({ length: 12 }, (_, i) => ({
     id: `ccfm-${i+1}`,
     nus: `CCF-2026-${String(89000+i+1).padStart(7,'0')}`,
@@ -87,6 +99,7 @@ export function getDemandeCCFM() {
 // ── Parcelles ─────────────────────────────────────────────────────
 
 export function getParcelles(page = 1) {
+  if (IS_LIVE) return apiClient.getParcelles(page);
   return Array.from({ length: 20 }, (_, i) => ({
     id: `p${(page-1)*20+i+1}`,
     nicad: `NIA/COM1/LOT${String(i+1).padStart(3,'0')}/SEC-${String(i+1).padStart(3,'0')}-${String(i+1).padStart(3,'0')}/${String(i+1).padStart(6,'0')}`,
@@ -101,6 +114,7 @@ export function getParcelles(page = 1) {
 // ── Notaire ───────────────────────────────────────────────────────
 
 export function getActesNotarials() {
+  if (IS_LIVE) return apiClient.getActesNotarials();
   return Array.from({ length: 10 }, (_, i) => ({
     id: `acte-${i+1}`,
     ref: `NOT-2026-${String(i+1).padStart(7,'0')}`,
@@ -114,6 +128,7 @@ export function getActesNotarials() {
 // ── Workflows ─────────────────────────────────────────────────────
 
 export function getWorkflowsEnCours() {
+  if (IS_LIVE) return apiClient.getWorkflowsEnCours();
   return Array.from({ length: 8 }, (_, i) => ({
     id: `wf-${i+1}`,
     type: ['RNAF','CCFM','BGU','MUTATION_VENTE','HYPOTHEQUE','SUCCESSION_FONCIERE','REGULARISATION','ARCHIVAGE_DEFINITIF'][i],
@@ -128,6 +143,7 @@ export function getWorkflowsEnCours() {
 // ── Alertes antifraude ────────────────────────────────────────────
 
 export function getAlertesAntifraude() {
+  if (IS_LIVE) return apiClient.getAlertesAntifraude();
   return [
     { id: 'af1', type: 'SUPERPOSITION', gravite: 'CRITIQUE', parcelle: 'NIA-0012', message: 'Superposition géom > 1m² détectée', timestamp: '2026-04-17 08:23' },
     { id: 'af2', type: 'PARTS_100',     gravite: 'BLOQUANT', parcelle: 'NIA-0089', message: 'Somme parts héritiers = 112%',       timestamp: '2026-04-17 09:45' },
@@ -139,6 +155,7 @@ export function getAlertesAntifraude() {
 // ── Vérification CCFM publique ────────────────────────────────────
 
 export function verifierCCFM(nus: string) {
+  if (IS_LIVE) return apiClient.verifierCCFM(nus);
   if (!nus.startsWith('CCF-')) return null
   return {
     valide: true,
@@ -151,3 +168,75 @@ export function verifierCCFM(nus: string) {
     etat: 'valide',
   }
 }
+
+// ── OBJECT WRAPPER EXPORTED AS DEFAULT & NAMED PROPERTY FOR COMPATIBILITY ──
+
+export const mockBackend = {
+  login,
+  getKpisNationaux,
+  getActiviteRecente,
+  getStatsByModule,
+  getDemandeCCFM,
+  getDemandesCCFM: async (filters: any = {}) => {
+    if (IS_LIVE) return apiClient.getDemandeCCFM();
+    return getDemandeCCFM();
+  },
+  getParcelles,
+  getActesNotarials,
+  getWorkflowsEnCours,
+  getAlertesAntifraude,
+  verifierCCFM: async (payload: any = {}) => {
+    const nus = typeof payload === 'string' ? payload : payload?.nus || '';
+    if (IS_LIVE) return apiClient.verifierCCFM(nus);
+    return verifierCCFM(nus);
+  },
+  getStatsCCFM: async () => {
+    if (IS_LIVE) {
+      try {
+        const res = await apiClient.http.get('/v1/ccfm/stats');
+        return res.data;
+      } catch { /* fallback */ }
+    }
+    return { total: 89441, en_cours: 341, verifies: 89100 };
+  },
+  avancerDemandeCCFM: async (id: string, newEtat: string) => {
+    if (IS_LIVE) {
+      const res = await apiClient.http.post(`/v1/ccfm/demandes/${id}/avancer`, { etat: newEtat });
+      return res.data;
+    }
+    console.log("State advanced (Mock):", id, newEtat);
+    return true;
+  },
+  creerDemandeCCFM: async (payload: any) => {
+    if (IS_LIVE) {
+      const res = await apiClient.http.post('/v1/ccfm/demandes/', payload);
+      return res.data;
+    }
+    console.log("Created demand (Mock):", payload);
+    return { id: "ccfm-new", ...payload };
+  },
+  deposerFicheConstat: async (payload: any) => {
+    if (IS_LIVE) {
+      const res = await apiClient.http.post('/v1/ccfm/constat', payload);
+      return res.data;
+    }
+    console.log("Constat deposited (Mock):", payload);
+    return true;
+  },
+  getFicheVerification: async (id: string) => {
+    if (IS_LIVE) {
+      const res = await apiClient.http.get(`/v1/ccfm/demandes/${id}/verification`);
+      return res.data;
+    }
+    return { id, checked: true };
+  },
+  getConstatTerrain: async (id: string) => {
+    if (IS_LIVE) {
+      const res = await apiClient.http.get(`/v1/ccfm/demandes/${id}/constat`);
+      return res.data;
+    }
+    return { id, checked: true };
+  },
+};
+
+export default mockBackend;

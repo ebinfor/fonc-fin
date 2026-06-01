@@ -2,7 +2,7 @@
  * FONCIER+ v3.4.7 — AuthContext
  */
 import React, { createContext, useContext, useState, ReactNode } from 'react'
-import { login as mockLogin } from '../services/mockBackend'
+import { login as realLogin } from '../services/apiClient'
 
 interface User {
   id: string
@@ -15,7 +15,7 @@ interface User {
 
 interface AuthContextType {
   user: User | null
-  login: (email: string, password: string) => boolean
+  login: (email: string, password: string) => Promise<boolean>
   logout: () => void
 }
 
@@ -29,8 +29,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch { return null }
   })
 
-  const login = (email: string, password: string): boolean => {
-    const result = mockLogin(email, password)
+  const login = async (email: string, password: string): Promise<boolean> => {
+    const result = await realLogin(email, password)
     if (!result) return false
     const u = result as User
     setUser(u)
@@ -41,6 +41,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const logout = () => {
     setUser(null)
     sessionStorage.removeItem('foncier_user')
+    localStorage.removeItem('foncier_jwt')
   }
 
   return (

@@ -51,7 +51,7 @@ export default function LoginPage() {
     setLoading(true)
     setError('')
     await new Promise(r => setTimeout(r, 600)) // UX: feedback visuel
-    const ok = login(email, password)
+    const ok = await login(email, password)
     setLoading(false)
     if (ok) navigate('/dashboard')
     else setError('Identifiants incorrects')

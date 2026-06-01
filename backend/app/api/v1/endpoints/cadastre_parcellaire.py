@@ -128,6 +128,70 @@ async def lister_parcelles(
     return result.scalars().all()
 
 
+@router.get("/nicad/{nicad}", response_model=dict)
+async def get_by_nicad(
+    nicad: str,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_role([
+        "ADMIN", "ADMIN_CADASTRE", "DIRECTEUR_CADASTRE", "CHEF_SERVICE_CADASTRE",
+        "GEOMETRE", "SECRETARIAT_CADASTRE", "DIRECTEUR_URBANISME",
+        "TOPOGRAPHE", "NOTAIRE", "BANQ_DIRECTEUR", "CHEF_CCFM",
+    ])),
+):
+    """Récupère une parcelle par son NICAD exact."""
+    if not NicadService.validate(nicad):
+        raise HTTPException(status_code=422, detail=f"Format NICAD invalide : {nicad!r}")
+
+    result = await db.execute(select(Parcelle).where(Parcelle.nicad == nicad))
+    parcelle = result.scalar_one_or_none()
+    if not parcelle:
+        raise HTTPException(status_code=404, detail=f"NICAD {nicad} introuvable")
+    return parcelle
+
+
+@router.get("/conflits/ouverts", response_model=list)
+async def lister_conflits_ouverts(
+    gravite: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_role([
+        "ADMIN", "ADMIN_CADASTRE", "DIRECTEUR_CADASTRE",
+        "DIRECTEUR_URBANISME", "AUDITEUR",
+    ])),
+):
+    """Liste tous les conflits antifraude ouverts ou bloqués — tableau de bord supervision."""
+    filters = [
+        ConflitParcellaire.statut.in_([StatutConflit.OUVERT, StatutConflit.BLOQUE])
+    ]
+    if gravite:
+        filters.append(ConflitParcellaire.gravite == gravite)
+
+    result = await db.execute(
+        select(ConflitParcellaire).where(and_(*filters))
+        .order_by(ConflitParcellaire.detecte_at.desc())
+        .offset((page - 1) * limit).limit(limit)
+    )
+    conflits = result.scalars().all()
+    return {
+        "total": len(conflits),
+        "page": page,
+        "conflits": [
+            {
+                "id": str(c.id),
+                "parcelle_a_id": str(c.parcelle_a_id),
+                "type_conflit": c.type_conflit,
+                "gravite": c.gravite,
+                "statut": c.statut,
+                "surface_intersection_m2": float(c.surface_intersection_m2 or 0),
+                "description": c.description,
+                "detecte_at": c.detecte_at.isoformat(),
+            }
+            for c in conflits
+        ],
+    }
+
+
 @router.get("/{parcelle_id}", response_model=ParcelleOut)
 async def get_parcelle(
     parcelle_id: str,
@@ -277,7 +341,7 @@ async def annuler_parcelle(
     payload: AnnulationRequest,
     db: AsyncSession = Depends(get_db),
     current_user=Depends(require_role([
-        "ADMIN", "DIRECTEUR_URBANISME", "MINISTRE_URBANISME",
+        "ADMIN", "DIRECTEUR_URBANISME",
     ])),
 ):
     """
@@ -384,66 +448,3 @@ async def check_peut_acte(
         "raison": reason if not can else "Parcelle éligible — aucun blocage détecté",
     }
 
-
-@router.get("/nicad/{nicad}", response_model=dict)
-async def get_by_nicad(
-    nicad: str,
-    db: AsyncSession = Depends(get_db),
-    current_user=Depends(require_role([
-        "ADMIN", "ADMIN_CADASTRE", "DIRECTEUR_CADASTRE", "CHEF_SERVICE_CADASTRE",
-        "GEOMETRE", "SECRETARIAT_CADASTRE", "DIRECTEUR_URBANISME",
-        "TOPOGRAPHE", "NOTAIRE", "BANQ_DIRECTEUR", "CHEF_CCFM",
-    ])),
-):
-    """Récupère une parcelle par son NICAD exact."""
-    if not NicadService.validate(nicad):
-        raise HTTPException(status_code=422, detail=f"Format NICAD invalide : {nicad!r}")
-
-    result = await db.execute(select(Parcelle).where(Parcelle.nicad == nicad))
-    parcelle = result.scalar_one_or_none()
-    if not parcelle:
-        raise HTTPException(status_code=404, detail=f"NICAD {nicad} introuvable")
-    return parcelle
-
-
-@router.get("/conflits/ouverts", response_model=list)
-async def lister_conflits_ouverts(
-    gravite: Optional[str] = Query(None),
-    page: int = Query(1, ge=1),
-    limit: int = Query(50, ge=1, le=100),
-    db: AsyncSession = Depends(get_db),
-    current_user=Depends(require_role([
-        "ADMIN", "ADMIN_CADASTRE", "DIRECTEUR_CADASTRE",
-        "DIRECTEUR_URBANISME", "AUDITEUR",
-    ])),
-):
-    """Liste tous les conflits antifraude ouverts ou bloqués — tableau de bord supervision."""
-    filters = [
-        ConflitParcellaire.statut.in_([StatutConflit.OUVERT, StatutConflit.BLOQUE])
-    ]
-    if gravite:
-        filters.append(ConflitParcellaire.gravite == gravite)
-
-    result = await db.execute(
-        select(ConflitParcellaire).where(and_(*filters))
-        .order_by(ConflitParcellaire.detecte_at.desc())
-        .offset((page - 1) * limit).limit(limit)
-    )
-    conflits = result.scalars().all()
-    return {
-        "total": len(conflits),
-        "page": page,
-        "conflits": [
-            {
-                "id": str(c.id),
-                "parcelle_a_id": str(c.parcelle_a_id),
-                "type_conflit": c.type_conflit,
-                "gravite": c.gravite,
-                "statut": c.statut,
-                "surface_intersection_m2": float(c.surface_intersection_m2 or 0),
-                "description": c.description,
-                "detecte_at": c.detecte_at.isoformat(),
-            }
-            for c in conflits
-        ],
-    }

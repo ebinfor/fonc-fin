@@ -13,7 +13,7 @@ import {
   getStatsByModule,
   getWorkflowsEnCours,
   getAlertesAntifraude,
-} from '../services/mockBackend'
+} from '../services/apiClient'
 
 // ── Types ─────────────────────────────────────────────────────────
 

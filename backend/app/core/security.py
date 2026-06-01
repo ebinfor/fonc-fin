@@ -22,6 +22,25 @@ _log = logging.getLogger("security")
 _bearer = HTTPBearer(auto_error=False)
 
 
+# ── Groupes de Rôles RBAC Standardisés (b79877d0) ─────────────────
+ROLES_ADMINS = ["ADMIN"]
+ROLES_NOTAIRES = ["ADMIN", "NOTAIRE"]
+ROLES_BANQUES = ["ADMIN", "BANQ_DIRECTEUR", "BANQ_AGENT"]
+ROLES_JUGES = ["ADMIN", "JUGE_FONCIER", "GREFFIER_TGI"]
+ROLES_CADASTRE = ["ADMIN", "INGENIEUR_CADASTRE", "DIRECTEUR_CADASTRE"]
+ROLES_DOMAINE = ["ADMIN", "GUICHETIER_DOMAINE", "DIRECTEUR_DOMAINE"]
+ROLES_CCFM = ["ADMIN", "GUICHETIER_CCFM", "CHEF_CCFM", "TOPOGRAPHE_CCFM"]
+
+# Rôles ayant le droit de lecture générale
+ROLES_READ_ALL = [
+    "ADMIN", "NOTAIRE", "BANQ_DIRECTEUR", "BANQ_AGENT",
+    "INGENIEUR_CADASTRE", "DIRECTEUR_CADASTRE", "CHEF_CCFM",
+    "JUGE_FONCIER", "AUDITEUR", "DIRECTEUR_DOMAINE", "MAIRE",
+    "MINISTRE_URBANISME", "SECRETAIRE_GENERAL", "COMMUNE_AGENT"
+]
+
+
+
 # ── Authentification JWT ──────────────────────────────────────────
 
 async def get_current_user(
@@ -37,6 +56,9 @@ async def get_current_user(
             settings.SECRET_KEY,
             algorithms=["HS256"],
         )
+        jti = payload.get("jti")
+        if jti and await JWTBlacklist.est_blackliste(jti):
+            raise HTTPException(status_code=401, detail="Token révoqué (déconnecté)")
         user_id: str = payload.get("sub")
         if not user_id:
             raise HTTPException(401, "Token invalide")
@@ -234,25 +256,47 @@ def verify_password(password: str, hashed: str) -> bool:
         return False
 
 
-def create_access_token(user_id: str, role: str, region: str) -> str:
-    """Cree un JWT HS256 avec exp 2h."""
-    from datetime import timedelta
-    from jose import jwt as jose_jwt
+def create_access_token(user_id: str, role: str, region: Optional[str] = "NATIONAL") -> str:
+    """Cree un JWT HS256 avec exp 2h et un JTI unique pour securisation."""
     import time
+    import uuid
+    from jose import jwt as jose_jwt
     payload = {
         "sub":    user_id,
         "role":   role,
-        "region": region,
+        "region": region or "NATIONAL",
         "iat":    int(time.time()),
         "exp":    int(time.time()) + 7200,  # 2h
+        "jti":    uuid.uuid4().hex,         # JWT ID unique
     }
     return jose_jwt.encode(payload, settings.SECRET_KEY, algorithm="HS256")
+
+
+def create_refresh_token(user_id: str) -> str:
+    """Cree un token de rafraichissement HS256 avec exp 7 jours."""
+    import time
+    import uuid
+    from jose import jwt as jose_jwt
+    payload = {
+        "sub":    user_id,
+        "iat":    int(time.time()),
+        "exp":    int(time.time()) + 604800,  # 7j
+        "jti":    uuid.uuid4().hex,           # JWT ID unique
+    }
+    return jose_jwt.encode(payload, settings.SECRET_KEY, algorithm="HS256")
+
+
+def decode_token(token: str) -> dict:
+    """Decode un token JWT, verifie sa validite et retourne le payload."""
+    from jose import jwt as jose_jwt
+    return jose_jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
 
 
 # ── JWTBlacklist stub (compatible v1.0.9) ────────────────────
 class JWTBlacklist:
     """Stub de blacklist JWT — à connecter à Redis en production."""
     _redis = None
+    _in_memory = set()  # Fallback en mémoire pour les tests et le développement local
 
     @classmethod
     async def init_redis(cls) -> None:
@@ -277,9 +321,20 @@ class JWTBlacklist:
     async def ajouter(cls, jti: str, ttl_s: int = 7200) -> None:
         if cls._redis:
             await cls._redis.setex(f"jwt_blacklist:{jti}", ttl_s, "1")
+        else:
+            cls._in_memory.add(jti)
 
     @classmethod
     async def est_blackliste(cls, jti: str) -> bool:
         if cls._redis:
             return bool(await cls._redis.exists(f"jwt_blacklist:{jti}"))
-        return False
+        return jti in cls._in_memory
+
+
+def calculate_sha256(*parts) -> str:
+    """Calcule le hash SHA-256 d'une concaténation de chaînes de caractères pour la traçabilité."""
+    import hashlib
+    return hashlib.sha256(
+        "|".join(str(p) for p in parts).encode()
+    ).hexdigest()
+

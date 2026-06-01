@@ -25,8 +25,8 @@ bcrypt==4.2.0
 redis==5.1.0
 minio==7.2.9
 
-# Géospatial (optionnel — nécessite GDAL système si activé)
-# geoalchemy2==0.15.2   # décommenter si PostGIS activé côté système
+# Géospatial (obligatoire — nécessite GDAL système si activé)
+geoalchemy2==0.15.2
 
 # Documents
 reportlab==4.2.2

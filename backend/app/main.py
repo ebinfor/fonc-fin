@@ -104,28 +104,51 @@ def get_request_id() -> str:
 
 
 # ── Rate limiting global ──────────────────────────────────────
+# ── Rate limiting global ──────────────────────────────────────
 class GlobalRateLimiter:
-    """Rate limiter par IP. Fenêtre glissante en mémoire."""
-    import collections
-    _store: dict = {}
+    """Rate limiter par IP basé sur Redis (Sorted Sets) et asynchrone."""
     WINDOW_SEC = 60
     MAX_GLOBAL = 1000
     MAX_AUTH   = 30
 
     @classmethod
-    def check(cls, ip: str, path: str = "") -> tuple:
-        import time, collections
-        now   = time.monotonic()
+    async def check(cls, ip: str, path: str = "") -> tuple:
+        import time
+        from app.core.security import JWTBlacklist
+        
         limit = cls.MAX_AUTH if "/auth/" in path else cls.MAX_GLOBAL
-        if ip not in cls._store:
-            cls._store[ip] = collections.deque()
-        dq = cls._store[ip]
-        while dq and dq[0] < now - cls.WINDOW_SEC:
-            dq.popleft()
-        if len(dq) >= limit:
-            return False, 0
-        dq.append(now)
-        return True, limit - len(dq)
+        
+        # Fallback si Redis n'est pas actif (ex: test local sans Redis)
+        if not JWTBlacklist._redis:
+            return True, limit
+
+        try:
+            r = JWTBlacklist._redis
+            now = time.time()
+            clear_before = now - cls.WINDOW_SEC
+            key_suffix = "auth" if "/auth/" in path else "global"
+            key = f"rate_limit:{key_suffix}:{ip}"
+            
+            # Utilisation d'un pipeline pour l'atomicité et la vitesse
+            pipe = r.pipeline()
+            pipe.zremrangebyscore(key, "-inf", clear_before)
+            pipe.zcard(key)
+            # Utiliser la valeur du timestamp + un microsecond float aléatoire pour éviter les doublons de score exacts
+            pipe.zadd(key, {f"{now}_{time.monotonic()}": now})
+            pipe.expire(key, cls.WINDOW_SEC + 10) # 10s de marge
+            
+            results = await pipe.execute()
+            count = results[1]
+            
+            if count >= limit:
+                # Si la limite est dépassée, on nettoie pour ne pas gonfler artificiellement le ZSET
+                await r.zremrangebyscore(key, now, "+inf")
+                return False, 0
+                
+            return True, limit - (count + 1)
+        except Exception as e:
+            logger.warning("RedisRateLimiter erreur: %s", e)
+            return True, limit
 
 
 @app.middleware("http")
@@ -139,7 +162,7 @@ async def rate_limit_middleware(request: Request, call_next):
         or request.headers.get("X-Real-IP", "")
         or getattr(request.client, "host", "unknown")
     )
-    allowed, remaining = GlobalRateLimiter.check(ip, path)
+    allowed, remaining = await GlobalRateLimiter.check(ip, path)
     if not allowed:
         return JSONResponse(
             status_code=429,

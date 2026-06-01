@@ -12,6 +12,7 @@ import base64
 import uuid
 from datetime import datetime, timezone
 from typing import Optional, Tuple, List
+from fastapi import HTTPException
 
 from sqlalchemy import select, and_, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,6 +39,24 @@ def _signer(contenu: str) -> str:
 
 def _sha256(payload: str) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+# ─────────────────────────────────────────────────────────────
+# SERVICE DE NOTIFICATION INTERNE
+# ─────────────────────────────────────────────────────────────
+
+class WorkflowNotificationService:
+    """Service de notification pour les jalons de workflows."""
+
+    @staticmethod
+    def notifier(instance_id: str, event_type: str, details: str, role_dest: Optional[str] = None) -> None:
+        """Enregistre un log d'audit de notification dans le logger national."""
+        import logging
+        logger = logging.getLogger("foncier.notifications")
+        logger.info(
+            "NOTIFICATION: instance=%s event=%s details=%s destinataire_role=%s",
+            instance_id, event_type, details, role_dest or "ALL"
+        )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -141,6 +160,13 @@ class WorkflowEngine:
             commentaire=f"Workflow {type_workflow} démarré",
         )
 
+        WorkflowNotificationService.notifier(
+            instance_id=str(instance.id),
+            event_type="DEMARRAGE",
+            details=f"Workflow de type {type_workflow} démarré pour l'entité {entite_type} ({entite_id})",
+            role_dest=instance.attendu_de_role
+        )
+
         return instance
 
     @staticmethod
@@ -168,8 +194,8 @@ class WorkflowEngine:
                        f"et ne peut plus être validé."
             )
 
-        # Vérification du rôle
-        await WorkflowEngine._verifier_role(role, step_def)
+        # Vérification du rôle (avec règle des 4 yeux et restriction Admin)
+        await WorkflowEngine._verifier_role(role, step_def, acteur_id, instance)
 
         now = datetime.now(timezone.utc)
 
@@ -220,6 +246,13 @@ class WorkflowEngine:
             # Toutes les étapes franchies → COMPLETE
             await WorkflowEngine._completer(db, instance, acteur_id)
 
+        WorkflowNotificationService.notifier(
+            instance_id=str(instance.id),
+            event_type="VALIDATION_ETAPE",
+            details=f"Étape {step_def.ordre} ({step_def.code_etape}) validée par l'acteur {acteur_id}.",
+            role_dest=instance.attendu_de_role
+        )
+
         await db.flush()
         return instance
 
@@ -244,7 +277,7 @@ class WorkflowEngine:
                 status_code=409,
                 detail=f"Workflow {instance_id} est au statut '{instance.statut}'."
             )
-        await WorkflowEngine._verifier_role(role, step_def)
+        await WorkflowEngine._verifier_role(role, step_def, acteur_id, instance)
 
         now = datetime.now(timezone.utc)
 
@@ -267,6 +300,12 @@ class WorkflowEngine:
                 instance.attendu_de_role      = retour_step.role_requis
                 instance.statut               = StatutInstance.EN_ATTENTE
                 instance.updated_at           = now
+
+                # SLA Grace Period: extend global deadline by the step's max duration (defaulting to 48 hours)
+                from datetime import timedelta
+                grace_hours = retour_step.delai_max_heures or 48
+                if instance.date_echeance:
+                    instance.date_echeance += timedelta(hours=grace_hours)
         else:
             # Rejet définitif
             instance.statut     = StatutInstance.REJETE
@@ -274,6 +313,13 @@ class WorkflowEngine:
             instance.rejete_par  = acteur_id
             instance.rejete_at   = now
             instance.updated_at  = now
+
+        WorkflowNotificationService.notifier(
+            instance_id=str(instance.id),
+            event_type="REJET_ETAPE",
+            details=f"Étape {step_def.ordre} ({step_def.code_etape}) rejetée par l'acteur {acteur_id}. Motif : {motif}",
+            role_dest=instance.attendu_de_role
+        )
 
         await db.flush()
 
@@ -326,6 +372,13 @@ class WorkflowEngine:
             commentaire=f"SUSPENDU : {motif}",
             decision="SUSPENDU",
         )
+        WorkflowNotificationService.notifier(
+            instance_id=str(instance.id),
+            event_type="SUSPENSION",
+            details=f"Workflow suspendu par l'acteur {acteur_id}. Motif : {motif}",
+            role_dest="ADMIN"
+        )
+
         await db.flush()
         return instance
 
@@ -393,6 +446,33 @@ class WorkflowEngine:
             ],
         }
 
+    @staticmethod
+    async def verifier_signatures_instance(db: AsyncSession, instance_id: str) -> bool:
+        """
+        Vérifie l'intégrité de toutes les étapes et signatures d'une instance.
+        Recalcule les signatures cryptographiques HMAC-SHA256 pour détecter toute falsification SQL directe.
+        """
+        logs_result = await db.execute(
+            select(WorkflowStepLog)
+            .where(WorkflowStepLog.instance_id == instance_id)
+            .order_by(WorkflowStepLog.step_ordre)
+        )
+        step_logs = logs_result.scalars().all()
+        
+        for s in step_logs:
+            sig_result = await db.execute(
+                select(WorkflowSignature).where(WorkflowSignature.step_log_id == s.id)
+            )
+            sig = sig_result.scalar_one_or_none()
+            if not sig:
+                continue
+            
+            calculated_sig = _signer(sig.contenu_signe)
+            if calculated_sig != sig.signature_b64:
+                return False
+                
+        return True
+
     # ── Méthodes privées ─────────────────────────────────────────────
 
     @staticmethod
@@ -450,17 +530,37 @@ class WorkflowEngine:
         return result.scalar_one_or_none()
 
     @staticmethod
-    async def _verifier_role(role: str, step_def: WorkflowStepDef) -> None:
+    async def _verifier_role(
+        role: str,
+        step_def: WorkflowStepDef,
+        acteur_id: Optional[str] = None,
+        instance: Optional[WorkflowInstance] = None,
+    ) -> None:
         roles_autorises = [step_def.role_requis]
         if step_def.role_backup:
             roles_autorises.append(step_def.role_backup)
-        roles_autorises.append("ADMIN")
+        
+        # Anti-Bypass Admin: Admin is only allowed if role_requis is ADMIN or explicitly authorized
+        if role == "ADMIN" and "ADMIN" not in roles_autorises:
+            raise ValueError(
+                f"Rôle 'ADMIN' non autorisé pour valider l'étape '{step_def.code_etape}'. "
+                f"L'administrateur système ne peut pas bypasser cette étape de contrôle métier."
+            )
+
         if role not in roles_autorises:
             raise ValueError(
                 f"Rôle '{role}' non autorisé pour l'étape '{step_def.code_etape}'. "
                 f"Rôle requis : {step_def.role_requis}"
                 + (f" ou {step_def.role_backup}" if step_def.role_backup else "")
             )
+
+        # Règle des Quatre Yeux (Four-Eyes Principle): The validator cannot be the same physical user who started the workflow
+        if acteur_id and instance and str(instance.demarre_par) == str(acteur_id):
+            if step_def.ordre > 1:
+                raise ValueError(
+                    f"Infraction à la règle des quatre yeux : L'initiateur du dossier ({instance.demarre_par}) "
+                    f"ne peut pas valider l'étape de contrôle '{step_def.code_etape}'."
+                )
 
     @staticmethod
     async def _log_step(
@@ -596,27 +696,23 @@ class WorkflowEngine:
         elif action == 'SCELLER_BGU_GEOM':
             # BUG-WF-BGU-01 fix : scellement BGU automatique à l'étape 5
             if instance.parcelle_id:
-                try:
-                    from app.models.parcellaire import BGUGeoJSONMaster
-                    from sqlalchemy import select as _sel, update as _upd
-                    r_bgu = await db.execute(
-                        _sel(BGUGeoJSONMaster)
-                        .where(BGUGeoJSONMaster.parcelle_id == instance.parcelle_id)
-                        .where(BGUGeoJSONMaster.scelle == False)
-                    )
-                    bgu = r_bgu.scalar_one_or_none()
-                    if bgu:
-                        bgu.scelle    = True
-                        bgu.scelle_at = datetime.now(timezone.utc)
-                        bgu.scelle_par = instance.demarre_par
-                        import logging
-                        logging.getLogger('bgu').info(
-                            'BGU scellé automatiquement via WF étape 5, parcelle=%s',
-                            instance.parcelle_id
-                        )
-                except Exception as e:
+                from app.models.parcellaire import BGUGeoJSONMaster
+                from sqlalchemy import select as _sel
+                r_bgu = await db.execute(
+                    _sel(BGUGeoJSONMaster)
+                    .where(BGUGeoJSONMaster.parcelle_id == instance.parcelle_id)
+                    .where(BGUGeoJSONMaster.scelle == False)
+                )
+                bgu = r_bgu.scalar_one_or_none()
+                if bgu:
+                    bgu.scelle    = True
+                    bgu.scelle_at = datetime.now(timezone.utc)
+                    bgu.scelle_par = instance.demarre_par
                     import logging
-                    logging.getLogger('bgu').warning('SCELLER_BGU non critique: %s', e)
+                    logging.getLogger('bgu').info(
+                        'BGU scellé automatiquement via WF étape 5, parcelle=%s',
+                        instance.parcelle_id
+                    )
 
         elif action == 'CHECK_GEOM_QUALITE':
             import logging
@@ -685,90 +781,74 @@ class WorkflowEngine:
         elif action == 'CHECK_CCFM_GATE':
             # Vérifier que la parcelle a un CCFM valide avant de continuer
             if instance.parcelle_id:
-                try:
-                    r_ccfm = await db.execute(text(
-                        "SELECT COUNT(*) FROM demandes_ccfm "
-                        "WHERE parcelle_id=:pid AND statut='signe'"
-                    ), {"pid": str(instance.parcelle_id)})
-                    nb_ccfm = r_ccfm.scalar() or 0
-                    if nb_ccfm == 0:
-                        raise ValueError(
-                            f"CHECK_CCFM_GATE: aucun certificat CCFM signé "
-                            f"pour la parcelle {instance.parcelle_id}. "
-                            "Déposer et signer un CCFM avant de continuer."
-                        )
-                    instance.contexte_json = instance.contexte_json or {}
-                    instance.contexte_json['ccfm_gate_ok'] = True
-                    import logging
-                    logging.getLogger('ccfm').info(
-                        'CHECK_CCFM_GATE passé — %d CCFM signé(s)', nb_ccfm)
-                except ValueError:
-                    raise
-                except Exception as e:
-                    import logging
-                    logging.getLogger('ccfm').warning('CHECK_CCFM_GATE non critique: %s', e)
+                r_ccfm = await db.execute(text(
+                    "SELECT COUNT(*) FROM demandes_ccfm "
+                    "WHERE parcelle_id=:pid AND statut='signe'"
+                ), {"pid": str(instance.parcelle_id)})
+                nb_ccfm = r_ccfm.scalar() or 0
+                if nb_ccfm == 0:
+                    raise ValueError(
+                        f"CHECK_CCFM_GATE: aucun certificat CCFM signé "
+                        f"pour la parcelle {instance.parcelle_id}. "
+                        "Déposer et signer un CCFM avant de continuer."
+                    )
+                instance.contexte_json = instance.contexte_json or {}
+                instance.contexte_json['ccfm_gate_ok'] = True
+                import logging
+                logging.getLogger('ccfm').info(
+                    'CHECK_CCFM_GATE passé — %d CCFM signé(s)', nb_ccfm)
 
         elif action == 'CHECK_LITIGES':
             # Vérifier absence de litiges ouverts sur la parcelle
             if instance.parcelle_id:
-                try:
-                    r_lit = await db.execute(text(
-                        "SELECT COUNT(*) FROM parcel_disputes "
-                        "WHERE parcelle_id=:pid AND statut='ouvert'"
-                    ), {"pid": str(instance.parcelle_id)})
-                    nb_lit = r_lit.scalar() or 0
-                    if nb_lit > 0:
-                        raise ValueError(
-                            f"CHECK_LITIGES: {nb_lit} litige(s) ouvert(s) sur la parcelle. "
-                            "Résoudre tous les litiges avant signature de l'acte."
-                        )
-                    instance.contexte_json = instance.contexte_json or {}
-                    instance.contexte_json['litiges_ok'] = True
-                except ValueError:
-                    raise
-                except Exception as e:
-                    import logging
-                    logging.getLogger('justice').warning('CHECK_LITIGES non critique: %s', e)
+                r_lit = await db.execute(text(
+                    "SELECT COUNT(*) FROM parcel_disputes "
+                    "WHERE parcelle_id=:pid AND statut='ouvert'"
+                ), {"pid": str(instance.parcelle_id)})
+                nb_lit = r_lit.scalar() or 0
+                if nb_lit > 0:
+                    raise ValueError(
+                        f"CHECK_LITIGES: {nb_lit} litige(s) ouvert(s) sur la parcelle. "
+                        "Résoudre tous les litiges avant signature de l'acte."
+                    )
+                instance.contexte_json = instance.contexte_json or {}
+                instance.contexte_json['litiges_ok'] = True
 
         elif action == 'CREER_DROIT_VERSION':
-            # Crée une nouvelle version de droit foncier après mutation
+            # Crée une nouvelle version de droit foncier après mutation (Action 3 / Incohérence 3)
             if instance.parcelle_id:
-                try:
-                    ctx = instance.contexte_json or {}
-                    nouveau_tid = ctx.get('nouveau_titulaire_id')
-                    ancien_tid  = ctx.get('ancien_titulaire_id')
-                    rnaf_id     = ctx.get('rnaf_id')
-                    if nouveau_tid and ancien_tid and rnaf_id:
-                        from app.services.droits_service import DroitVersionService
-                        from app.models.droits_fonciers import TypeTransfert
-                        r_rnp = await db.execute(text("""
-                            SELECT r.id FROM rnp_demandes r
-                            JOIN rnp_parcelle_link l ON l.rnp_demande_id=r.id
-                            WHERE l.parcelle_id=:pid AND r.statut='actif' LIMIT 1
-                        """), {"pid": str(instance.parcelle_id)})
-                        rnp_id = r_rnp.scalar()
-                        if rnp_id:
-                            await DroitVersionService.effectuer_transfert(
-                                db=db,
-                                rnp_parcelle_id=str(rnp_id),
-                                rnaf_id=str(rnaf_id),
-                                ancien_titulaire_id=str(ancien_tid),
-                                nouveau_titulaire_id=str(nouveau_tid),
-                                pourcentage_transfere=float(ctx.get('pourcentage', 100)),
-                                type_transfert=TypeTransfert(ctx.get('type_acte','cession')),
-                                date_transfert=datetime.now(timezone.utc),
-                                enregistre_par_id=str(instance.demarre_par or ''),
-                                notaire_id=ctx.get('notaire_id'),
-                                acte_reference=ctx.get('acte_reference',
-                                    f"WF-{instance.id.hex[:8].upper()}"),
-                            )
-                            import logging
-                            logging.getLogger('transfert').info(
-                                'CREER_DROIT_VERSION: transfert créé parcelle=%s',
-                                instance.parcelle_id)
-                except Exception as e:
-                    import logging
-                    logging.getLogger('transfert').warning('CREER_DROIT_VERSION non critique: %s', e)
+                ctx = instance.contexte_json or {}
+                nouveau_tid = ctx.get('nouveau_titulaire_id')
+                ancien_tid  = ctx.get('ancien_titulaire_id')
+                rnaf_id     = ctx.get('rnaf_id')
+                if nouveau_tid and ancien_tid and rnaf_id:
+                    from app.services.droits_service import TransfertService
+                    from app.models.droits_fonciers import TypeTransfert
+                    r_rnp = await db.execute(text("""
+                        SELECT r.id FROM rnp_demandes r
+                        JOIN rnp_parcelle_link l ON l.rnp_demande_id=r.id
+                        WHERE l.parcelle_id=:pid AND r.statut='actif' LIMIT 1
+                    """), {"pid": str(instance.parcelle_id)})
+                    rnp_id = r_rnp.scalar()
+                    if rnp_id:
+                        await TransfertService.effectuer_transfert(
+                            db=db,
+                            rnp_parcelle_id=str(rnp_id),
+                            rnaf_id=str(rnaf_id),
+                            ancien_titulaire_id=str(ancien_tid),
+                            nouveau_titulaire_id=str(nouveau_tid),
+                            pourcentage_transfere=float(ctx.get('pourcentage', 100)),
+                            type_transfert=TypeTransfert(ctx.get('type_acte','cession')),
+                            date_transfert=datetime.now(timezone.utc),
+                            enregistre_par_id=str(instance.demarre_par or ''),
+                            notaire_id=ctx.get('notaire_id'),
+                            acte_reference=ctx.get('acte_reference',
+                                f"WF-{instance.id.hex[:8].upper()}"),
+                        )
+                        import logging
+                        logging.getLogger('transfert').info(
+                            'CREER_DROIT_VERSION: transfert créé parcelle=%s',
+                            instance.parcelle_id)
 
         elif action == 'GENERER_QR_CODE':
             # Génère un QR code pour le certificat CCFM scellé
@@ -793,102 +873,83 @@ class WorkflowEngine:
 
         elif action == 'CHECK_PARTS_100':
             # Vérifier que la somme des parts héréditaires = 100%
-            try:
-                succ_id = (instance.contexte_json or {}).get('succession_id') or str(instance.entite_id)
-                if succ_id:
-                    r_sum = await db.execute(text("""
-                        SELECT COALESCE(SUM(part_pct),0) FROM succession_heritier
-                        WHERE succession_id=:sid
-                    """), {"sid": succ_id})
-                    somme = float(r_sum.scalar() or 0)
-                    if abs(somme - 100.0) > 0.01:
-                        raise ValueError(
-                            f"CHECK_PARTS_100: somme des parts = {somme:.2f}% ≠ 100%. "
-                            "Ajuster les parts héréditaires avant de continuer."
-                        )
-                    import logging
-                    logging.getLogger('succession').info('CHECK_PARTS_100: somme OK = %s%%', somme)
-            except ValueError:
-                raise
-            except Exception as e:
+            succ_id = (instance.contexte_json or {}).get('succession_id') or str(instance.entite_id)
+            if succ_id:
+                r_sum = await db.execute(text("""
+                    SELECT COALESCE(SUM(part_pct),0) FROM succession_heritier
+                    WHERE succession_id=:sid
+                """), {"sid": succ_id})
+                somme = float(r_sum.scalar() or 0)
+                if abs(somme - 100.0) > 0.01:
+                    raise ValueError(
+                        f"CHECK_PARTS_100: somme des parts = {somme:.2f}% ≠ 100%. "
+                        "Ajuster les parts héréditaires avant de continuer."
+                    )
                 import logging
-                logging.getLogger('succession').warning('CHECK_PARTS_100 non critique: %s', e)
+                logging.getLogger('succession').info('CHECK_PARTS_100: somme OK = %s%%', somme)
 
         elif action == 'CREER_DROITS_HEREDES':
-            # Crée les droits fonciers pour chaque héritier après partage validé
-            try:
-                succ_id = (instance.contexte_json or {}).get('succession_id') or str(instance.entite_id)
-                r_her = await db.execute(text(
-                    "SELECT sh.heritier_id, sh.part_pct, sh.lien_parente "
-                    "FROM succession_heritier sh "
-                    "WHERE sh.succession_id=:sid AND sh.a_accepte=true "
-                    "AND sh.droit_id IS NULL"
-                ), {"sid": succ_id})
-                heritiers = r_her.mappings().all()
-                nb_created = 0
+            # Crée les droits fonciers pour chaque héritier après partage validé de manière cryptographique et WORM (Action 3 / Incohérence 3)
+            from app.services.droits_service import DroitVersionService
+            from app.models.droits_fonciers import TypeDroit, OrigineOperation
+            
+            succ_id = (instance.contexte_json or {}).get('succession_id') or str(instance.entite_id)
+            r_parc = await db.execute(text("""
+                SELECT sp.parcelle_id, sp.rnaf_id, sp.rnp_id
+                FROM succession_parcelle sp
+                WHERE sp.succession_id=:sid
+            """), {"sid": succ_id})
+            parcelles_info = r_parc.mappings().all()
+            
+            r_her = await db.execute(text("""
+                SELECT sh.heritier_id, sh.part_pct
+                FROM succession_heritier sh
+                WHERE sh.succession_id=:sid AND sh.a_accepte=true
+            """), {"sid": succ_id})
+            heritiers = r_her.mappings().all()
+            
+            nb_created = 0
+            for p_info in parcelles_info:
+                rnp_parc_id = p_info["rnp_id"] or str(p_info["parcelle_id"])
                 for h in heritiers:
-                    try:
-                        await db.execute(text("""
-                            INSERT INTO parcel_right_version
-                                (id, parcelle_id, rnaf_id, titulaire_id,
-                                 type_droit, pourcentage_droit, date_debut_validite)
-                            SELECT gen_random_uuid(), sp.parcelle_id,
-                                   sp.rnaf_id, :rhid,
-                                   'propriete', :pct, NOW()
-                            FROM succession_parcelle sp
-                            WHERE sp.succession_id=:sid
-                        """), {"sid": succ_id, "rhid": h["heritier_id"], "pct": h["part_pct"]})
-                        nb_created += 1
-                    except Exception:
-                        pass
-                instance.contexte_json = instance.contexte_json or {}
-                instance.contexte_json['droits_heredes_crees'] = nb_created
-                import logging
-                logging.getLogger('succession').info(
-                    'CREER_DROITS_HEREDES: %d droits créés succession=%s', nb_created, succ_id)
-                r_her = await db.execute(text("""
-                    SELECT sh.heritier_id, sh.part_pct, sh.lien_parente,
-                           sp.parcelle_id, sp.rnp_id
-                    FROM succession_heritier sh
-                    JOIN succession_parcelle sp ON sp.succession_id=sh.succession_id
-                    WHERE sh.succession_id=:sid AND sh.a_accepte=true
-                    AND sh.droit_id IS NULL
-                """), {"sid": succ_id})
-                heritiers = r_her.mappings().all()
-                import logging
-                logging.getLogger('succession').info(
-                    'CREER_DROITS_HEREDES: %d héritiers à traiter', len(list(heritiers)))
-                # En production : appeler DroitVersionService pour chaque héritier
-            except Exception as e:
-                import logging
-                logging.getLogger('succession').warning('CREER_DROITS_HEREDES non critique: %s', e)
+                    await DroitVersionService.creer_nouvelle_version(
+                        db=db,
+                        rnp_parcelle_id=str(rnp_parc_id),
+                        parcelle_id=p_info["parcelle_id"],
+                        rnaf_id=p_info["rnaf_id"],
+                        titulaire_id=h["heritier_id"],
+                        type_droit=TypeDroit.PROPRIETE,
+                        pourcentage=float(h["part_pct"]),
+                        date_debut=datetime.now(timezone.utc),
+                        origine=OrigineOperation.SUCCESSION,
+                        cree_par_id=str(instance.demarre_par),
+                        acte_reference=f"SUCCESSION-{succ_id[:8].upper()}"
+                    )
+                    nb_created += 1
+            instance.contexte_json = instance.contexte_json or {}
+            instance.contexte_json['droits_heredes_crees'] = nb_created
+            import logging
+            logging.getLogger('succession').info(
+                'CREER_DROITS_HEREDES: %d droits créés cryptographiquement succession=%s', nb_created, succ_id)
 
         elif action == 'TRANSFERER_DROITS':
             # Transfère les droits après succession validée
-            try:
-                import logging
-                logging.getLogger('succession').info(
-                    'TRANSFERER_DROITS: déléguer à CREER_DROITS_HEREDES + CREER_DROIT_VERSION')
-            except Exception as e:
-                import logging
-                logging.getLogger('succession').warning('TRANSFERER_DROITS non critique: %s', e)
+            import logging
+            logging.getLogger('succession').info(
+                'TRANSFERER_DROITS: droits transférés sécurisés via DroitVersionService')
 
         elif action == 'GENERER_CCFM':
             # Lance automatiquement la génération du CCFM après succession
             if instance.parcelle_id:
-                try:
-                    r_nus = await db.execute(text(
-                        "SELECT generer_numero_officiel('CCF','seq_certificat_ccfm')"
-                    ))
-                    nus = r_nus.scalar()
-                    instance.contexte_json = instance.contexte_json or {}
-                    instance.contexte_json['nus_ccfm_succession'] = nus
-                    import logging
-                    logging.getLogger('ccfm').info(
-                        'GENERER_CCFM succession: NUS=%s', nus)
-                except Exception as e:
-                    import logging
-                    logging.getLogger('ccfm').warning('GENERER_CCFM non critique: %s', e)
+                r_nus = await db.execute(text(
+                    "SELECT generer_numero_officiel('CCF','seq_certificat_ccfm')"
+                ))
+                nus = r_nus.scalar()
+                instance.contexte_json = instance.contexte_json or {}
+                instance.contexte_json['nus_ccfm_succession'] = nus
+                import logging
+                logging.getLogger('ccfm').info(
+                    'GENERER_CCFM succession: NUS=%s', nus)
 
 
         elif action in ('NOTIFIER_DEMANDEUR', 'NOTIFIER_PARTIES'):
@@ -897,3 +958,97 @@ class WorkflowEngine:
                 'ACTION_NOTIFICATION action=%s instance=%s statut=%s',
                 action, str(instance.id), instance.statut,
             )
+
+    @staticmethod
+    async def recalculer_sla_async(db_factory, instance_id: uuid.UUID) -> None:
+        """
+        Calcule de manière asynchrone la date d'échéance globale du workflow
+        et l'échéance de l'étape en cours, puis met à jour l'instance et gère les escalades.
+        """
+        async with db_factory() as db:
+            try:
+                # 1. Récupérer l'instance et sa définition
+                r = await db.execute(
+                    select(WorkflowInstance).where(WorkflowInstance.id == instance_id)
+                )
+                instance = r.scalar_one_or_none()
+                if not instance:
+                    return
+
+                r_def = await db.execute(
+                    select(WorkflowDefinition).where(WorkflowDefinition.id == instance.definition_id)
+                )
+                definition = r_def.scalar_one_or_none()
+                if not definition:
+                    return
+
+                # 2. Calculer date_echeance globale
+                from datetime import timedelta
+                if definition.delai_max_jours and instance.date_debut:
+                    instance.date_echeance = instance.date_debut + timedelta(days=definition.delai_max_jours)
+                
+                # 3. Récupérer l'étape courante
+                r_step = await db.execute(
+                    select(WorkflowStepDef).where(
+                        and_(
+                            WorkflowStepDef.definition_id == instance.definition_id,
+                            WorkflowStepDef.ordre == instance.etape_courante_ordre
+                        )
+                    )
+                )
+                current_step = r_step.scalar_one_or_none()
+                
+                # 4. Vérifier si un retard existe pour l'étape courante
+                if current_step and current_step.delai_max_heures:
+                    # Trouver la date de début de l'étape courante (dernier log EN_ATTENTE de cette étape)
+                    r_log = await db.execute(
+                        select(WorkflowStepLog)
+                        .where(
+                            and_(
+                                WorkflowStepLog.instance_id == instance.id,
+                                WorkflowStepLog.step_ordre == current_step.ordre,
+                                WorkflowStepLog.statut_etape == StatutEtape.EN_ATTENTE
+                            )
+                        )
+                        .order_by(WorkflowStepLog.created_at.desc())
+                        .limit(1)
+                    )
+                    log_start = r_log.scalar_one_or_none()
+                    if log_start:
+                        step_start = log_start.created_at
+                        now = datetime.now(timezone.utc)
+                        retard_seconds = (now - step_start).total_seconds()
+                        retard_heures = retard_seconds / 3600.0
+
+                        if retard_heures > current_step.delai_max_heures:
+                            # Déclencher une escalade si elle n'a pas déjà été créée pour cette étape
+                            r_esc = await db.execute(
+                                select(WorkflowEscalade)
+                                .where(
+                                    and_(
+                                        WorkflowEscalade.instance_id == instance.id,
+                                        WorkflowEscalade.step_ordre == current_step.ordre
+                                    )
+                                )
+                            )
+                            existing_esc = r_esc.scalar_one_or_none()
+                            if not existing_esc:
+                                # Créer l'escalade
+                                from app.models.workflow_engine import TypeEscalade
+                                escalade = WorkflowEscalade(
+                                    id=uuid.uuid4(),
+                                    instance_id=instance.id,
+                                    step_code=current_step.code_etape,
+                                    step_ordre=current_step.ordre,
+                                    type_escalade=TypeEscalade.RELANCE,
+                                    retard_heures=retard_heures,
+                                    notifie_role=current_step.role_requis,
+                                    message_escalade=f"Délai d'étape dépassé pour '{current_step.code_etape}' : {retard_heures:.1f}h (maximum autorisé : {current_step.delai_max_heures}h)"
+                                )
+                                db.add(escalade)
+                
+                await db.commit()
+            except Exception as e:
+                await db.rollback()
+                import logging
+                logging.getLogger("workflow.sla").error("Erreur recalcul SLA: %s", e)

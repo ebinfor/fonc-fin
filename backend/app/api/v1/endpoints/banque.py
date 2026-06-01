@@ -31,17 +31,20 @@ from sqlalchemy import select, and_, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import require_role, get_current_user
+from app.core.security import (require_role, get_current_user,
+    calculate_sha256, ROLES_BANQUES, ROLES_READ_ALL)
 from app.models.droits_fonciers import MortgageRegistry, StatutHypotheque
+from app.models.banque import (
+    HypothequeDossier, HypothequeLegacy, AutorisationBancaire, LeveeHypotheque
+)
 from app.services.workflow_orchestrator import TransactionGate
 
 router = APIRouter(prefix="/banque", tags=["Banque — Hypothèques"])
 
-ROLES_BANQUE = ["ADMIN", "BANQ_DIRECTEUR", "BANQ_AGENT"]
-ROLES_DIR    = ["ADMIN", "BANQ_DIRECTEUR", "BANQ_AGENT"]
-ROLES_READ   = ["ADMIN", "BANQ_DIRECTEUR", "BANQ_AGENT",
-                "NOTAIRE", "AUDITEUR", "DIRECTEUR_CADASTRE",
-                "CHEF_CCFM", "JUGE_FONCIER"]
+ROLES_BANQUE = ROLES_BANQUES
+ROLES_DIR    = ROLES_BANQUES
+ROLES_READ   = ROLES_READ_ALL
+
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -81,10 +84,8 @@ class MainleveeIn(BaseModel):
     montant_solde: Optional[float] = None
 
 
-def _sha(*parts) -> str:
-    return hashlib.sha256(
-        "|".join(str(p) for p in parts).encode()
-    ).hexdigest()
+_sha = calculate_sha256
+
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -295,34 +296,25 @@ async def ouvrir_dossier_hypotheque(
     except Exception as e:
         raise HTTPException(500, str(e)[:200])
 
-    dos_id = str(uuid.uuid4())
-    sha = _sha(dos_id, payload.parcelle_id, payload.banque_id,
+    dos_id = uuid.uuid4()
+    sha = _sha(str(dos_id), payload.parcelle_id, payload.banque_id,
                str(payload.montant_fcfa))
     try:
-        await db.execute(text("""
-            INSERT INTO hypotheque_dossier
-                (id, parcelle_id, rnp_parcelle_id,
-                 debiteur_id, banque_id,
-                 montant_fcfa, taux_interet, duree_mois,
-                 ccfm_validation_id, statut,
-                 sha256_dossier, cree_par, created_at)
-            VALUES
-                (:id, :parc, :rnp,
-                 :deb, :bid,
-                 :mnt, :taux, :duree,
-                 :ccfm, 'initie',
-                 :sha, :uid, NOW())
-        """), {
-            "id": dos_id, "parc": payload.parcelle_id,
-            "rnp": payload.rnp_parcelle_id,
-            "deb": payload.debiteur_id,
-            "bid": payload.banque_id,
-            "mnt": payload.montant_fcfa,
-            "taux": payload.taux_interet,
-            "duree": payload.duree_mois,
-            "ccfm": payload.ccfm_validation_id,
-            "sha": sha, "uid": str(current_user.id),
-        })
+        dossier = HypothequeDossier(
+            id=dos_id,
+            parcelle_id=uuid.UUID(payload.parcelle_id),
+            rnp_parcelle_id=uuid.UUID(payload.rnp_parcelle_id),
+            debiteur_id=uuid.UUID(payload.debiteur_id),
+            banque_id=uuid.UUID(payload.banque_id),
+            montant_fcfa=payload.montant_fcfa,
+            taux_interet=payload.taux_interet,
+            duree_mois=payload.duree_mois,
+            ccfm_validation_id=payload.ccfm_validation_id,
+            statut="initie",
+            sha256_dossier=sha,
+            cree_par=current_user.id,
+        )
+        db.add(dossier)
         await db.commit()
     except Exception as e:
         await db.rollback()
@@ -332,7 +324,7 @@ async def ouvrir_dossier_hypotheque(
         raise HTTPException(400, str(e)[:200])
 
     return {
-        "id": dos_id,
+        "id": str(dos_id),
         "statut": "initie",
         "sha256_dossier": sha,
         "montant_fcfa": payload.montant_fcfa,
@@ -488,32 +480,32 @@ async def inscrire_hypotheque(
 
     sha = _sha(payload.parcelle_id, payload.banque_id,
                str(payload.montant_fcfa), str(datetime.now(timezone.utc)))
-    hypo_id = str(uuid.uuid4())
+    hypo_id = uuid.uuid4()
 
     try:
-        # Table legacy hypotheques
-        await db.execute(text("""
-            INSERT INTO hypotheques
-                (id, parcelle_id, montant, statut, created_at)
-            VALUES
-                (:id, :pid, :mnt, 'active', NOW())
-        """), {"id": hypo_id, "pid": payload.parcelle_id,
-               "mnt": payload.montant_fcfa})
+        # Table legacy hypotheques via ORM
+        legacy_hypo = HypothequeLegacy(
+            id=hypo_id,
+            parcelle_id=uuid.UUID(payload.parcelle_id),
+            montant=payload.montant_fcfa,
+            statut="active"
+        )
+        db.add(legacy_hypo)
 
         # mortgage_registry — trigger tg_verifier_banque_agreee valide banque_id
         mortgage = MortgageRegistry(
             id=uuid.uuid4(),
             hypotheque_id=hypo_id,
-            rnp_parcelle_id=payload.rnp_parcelle_id,
-            parcelle_id=payload.parcelle_id,
+            rnp_parcelle_id=uuid.UUID(payload.rnp_parcelle_id),
+            parcelle_id=uuid.UUID(payload.parcelle_id),
             banque_holder_id=holder_id,
-            banque_id=payload.banque_id,
+            banque_id=uuid.UUID(payload.banque_id),
             montant=payload.montant_fcfa,
             devise="XOF",
             date_debut=datetime.now(timezone.utc),
             statut=StatutHypotheque.ACTIVE,
             reference_contrat=payload.reference_contrat,
-            rnaf_id=payload.rnaf_id,
+            rnaf_id=uuid.UUID(payload.rnaf_id),
             ccfm_validation_id=payload.ccfm_validation_id,
             sha256_contrat=sha,
         )
@@ -645,26 +637,19 @@ async def emettre_autorisation_bancaire(
         raise HTTPException(404, "Right_holder bancaire introuvable")
 
     try:
-        await db.execute(text("""
-            INSERT INTO autorisation_bancaire
-                (id, hypotheque_dossier_id, banque_holder_id,
-                 type_operation, statut, conditions,
-                 montant_garanti_fcfa, valide_jusqu_au,
-                 sha256_autorisation, accordee_par, accordee_at, created_at)
-            VALUES
-                (gen_random_uuid(), :did, :hid,
-                 :type, 'accordee', :cond,
-                 :mnt, :valide,
-                 :sha, :uid, NOW(), NOW())
-        """), {
-            "did": payload.hypotheque_dossier_id,
-            "hid": holder_id,
-            "type": payload.type_operation,
-            "cond": payload.conditions,
-            "mnt": payload.montant_garanti_fcfa,
-            "valide": payload.valide_jusqu_au,
-            "sha": sha, "uid": str(current_user.id),
-        })
+        aut = AutorisationBancaire(
+            id=uuid.uuid4(),
+            hypotheque_dossier_id=uuid.UUID(payload.hypotheque_dossier_id),
+            banque_holder_id=holder_id,
+            type_operation=payload.type_operation,
+            statut="accordee",
+            conditions=payload.conditions,
+            montant_garanti_fcfa=payload.montant_garanti_fcfa,
+            valide_jusqu_au=payload.valide_jusqu_au,
+            sha256_autorisation=sha,
+            accordee_par=current_user.id,
+        )
+        db.add(aut)
         await db.commit()
     except Exception as e:
         await db.rollback()
@@ -719,7 +704,7 @@ async def prononcer_mainlevee(
         raise HTTPException(422, f"motif : {MOTIFS}")
 
     r = await db.execute(
-        select(MortgageRegistry).where(MortgageRegistry.id == mortgage_id)
+        select(MortgageRegistry).where(MortgageRegistry.id == uuid.UUID(mortgage_id))
     )
     mortgage = r.scalar_one_or_none()
     if not mortgage:
@@ -732,32 +717,28 @@ async def prononcer_mainlevee(
     sha = _sha(mortgage_id, payload.motif, payload.acte_mainlevee_ref)
     now = datetime.now(timezone.utc)
 
+    # Récupérer l'ID du dossier d'hypothèque
+    r_dos = await db.execute(
+        select(HypothequeDossier.id).where(HypothequeDossier.mortgage_registry_id == uuid.UUID(mortgage_id))
+    )
+    dossier_id = r_dos.scalar()
+
     try:
-        # Enregistrement officiel dans levee_hypotheque
-        await db.execute(text("""
-            INSERT INTO levee_hypotheque
-                (id, hypotheque_dossier_id, hypotheque_id,
-                 mortgage_registry_id, motif, montant_solde,
-                 acte_mainlevee_ref, notaire_id,
-                 sha256_mainlevee, date_levee, enregistre_par)
-            VALUES
-                (gen_random_uuid(),
-                 (SELECT id FROM hypotheque_dossier
-                  WHERE mortgage_registry_id=:mid LIMIT 1),
-                 :hyp_id, :mid,
-                 :motif, :solde,
-                 :acte, :notaire,
-                 :sha, NOW(), :uid)
-        """), {
-            "mid": mortgage_id,
-            "hyp_id": str(mortgage.hypotheque_id),
-            "motif": payload.motif,
-            "solde": payload.montant_solde,
-            "acte": payload.acte_mainlevee_ref,
-            "notaire": payload.notaire_id,
-            "sha": sha,
-            "uid": str(current_user.id),
-        })
+        # Enregistrement officiel dans levee_hypotheque via ORM
+        levee = LeveeHypotheque(
+            id=uuid.uuid4(),
+            hypotheque_dossier_id=dossier_id,
+            hypotheque_id=mortgage.hypotheque_id,
+            mortgage_registry_id=mortgage.id,
+            motif=payload.motif,
+            montant_solde=payload.montant_solde,
+            acte_mainlevee_ref=payload.acte_mainlevee_ref,
+            notaire_id=uuid.UUID(payload.notaire_id) if payload.notaire_id else None,
+            sha256_mainlevee=sha,
+            date_levee=now,
+            enregistre_par=current_user.id
+        )
+        db.add(levee)
 
         # Mettre à jour mortgage_registry
         mortgage.statut    = StatutHypotheque.LEVEE
@@ -766,10 +747,13 @@ async def prononcer_mainlevee(
         mortgage.motif_levee = payload.motif
         mortgage.acte_mainlevee = payload.acte_mainlevee_ref
 
-        # Mettre à jour hypotheques legacy
-        await db.execute(text("""
-            UPDATE hypotheques SET statut='levee' WHERE id=:id
-        """), {"id": str(mortgage.hypotheque_id)})
+        # Mettre à jour hypotheques legacy via ORM
+        r_legacy = await db.execute(
+            select(HypothequeLegacy).where(HypothequeLegacy.id == mortgage.hypotheque_id)
+        )
+        legacy_hypo = r_legacy.scalar_one_or_none()
+        if legacy_hypo:
+            legacy_hypo.statut = "levee"
 
         await db.commit()
     except Exception as e:

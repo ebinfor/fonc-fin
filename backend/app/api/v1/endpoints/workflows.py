@@ -4,17 +4,25 @@ Expose WorkflowEngine.demarrer, valider_etape, rejeter_etape,
 suspendre, get_etat pour les 33 workflows nationaux.
 """
 from typing import Optional, List
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from pydantic import BaseModel, Field
 from sqlalchemy import select, and_, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import get_db
+from app.core.database import get_db, async_session_factory
 from app.core.security import require_role, get_current_user
 from app.models.workflow_engine import WorkflowInstance, StatutInstance
 from app.services.workflow_engine import WorkflowEngine
 
 router = APIRouter(prefix="/workflows", tags=["Workflows — Moteur"])
+
+
+_ROLES_LECTURE = [
+    "ADMIN", "DIRECTEUR_CADASTRE", "DIRECTEUR_URBANISME", "CHEF_CCFM", "NOTAIRE",
+    "JUGE_FONCIER", "OPERATEUR_CADASTRE", "INGENIEUR_CADASTRE", "GEOMETRE_CADASTRE",
+    "RECEVEUR_ENREG", "EDITEUR_JO", "AUDITEUR", "GREFFIER_TGI", "OPERATEUR_CCFM",
+    "TOPOGRAPHE_CCFM"
+]
 
 
 class DemarrerIn(BaseModel):
@@ -48,6 +56,7 @@ class SuspendreIn(BaseModel):
 @router.post("/demarrer", status_code=201)
 async def demarrer_workflow(
     payload: DemarrerIn,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -71,6 +80,7 @@ async def demarrer_workflow(
         await db.rollback()
         raise HTTPException(422, str(e))
     await db.commit()
+    background_tasks.add_task(WorkflowEngine.recalculer_sla_async, async_session_factory, instance.id)
     return {
         "id": str(instance.id),
         "statut": instance.statut,
@@ -100,6 +110,7 @@ async def lister_instances(
     statut:        Optional[str] = Query(None),
     entite_id:     Optional[str] = Query(None),
     en_retard:     Optional[bool]= Query(None),
+    todo_only:     Optional[bool]= Query(None),
     page:  int = Query(1, ge=1),
     limit: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
@@ -126,6 +137,19 @@ async def lister_instances(
 
     if en_retard is True:
         where += " AND wi.date_echeance < NOW() AND wi.statut::TEXT NOT IN ('TERMINE','ANNULE')"
+
+    if todo_only is True:
+        # Action 4 / Incohérence 4 : Filtre pour voir uniquement les dossiers en attente du rôle principal OU du rôle de secours (backup)
+        where += """ AND (
+            wi.attendu_de_role = :user_role
+            OR EXISTS (
+                SELECT 1 FROM workflow_step_def wsd
+                WHERE wsd.definition_id = wi.definition_id
+                  AND wsd.code_etape = wi.etape_courante
+                  AND wsd.role_backup = :user_role
+            )
+        ) AND wi.statut::TEXT = 'EN_COURS'"""
+        params["user_role"] = current_user.role
 
     # Filtre par acteur : chaque operateur voit ses propres workflows
     if not scope.peut_voir_national:
@@ -161,6 +185,7 @@ async def lister_instances(
 async def valider_etape(
     instance_id: str,
     payload: ValiderIn,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -179,6 +204,7 @@ async def valider_etape(
         await db.rollback()
         raise HTTPException(422, str(e))
     await db.commit()
+    background_tasks.add_task(WorkflowEngine.recalculer_sla_async, async_session_factory, instance.id)
     return {
         "id": str(instance.id),
         "statut": instance.statut,
@@ -191,6 +217,7 @@ async def valider_etape(
 async def rejeter_etape(
     instance_id: str,
     payload: RejeterIn,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -207,6 +234,7 @@ async def rejeter_etape(
         await db.rollback()
         raise HTTPException(422, str(e))
     await db.commit()
+    background_tasks.add_task(WorkflowEngine.recalculer_sla_async, async_session_factory, instance.id)
     return {"id": str(instance.id), "statut": instance.statut,
             "motif_rejet": instance.motif_rejet}
 

@@ -285,8 +285,10 @@ async def emettre_ordre_mission(
     """
     svc = _get_service(db)
     try:
+        data = dict(payload) if payload else {}
+        data["ccfm_id"] = str(ccfm_id)
         return await svc.emettre_ordre_mission(
-            str(ccfm_id), payload, secretaire_id=_user_id(user)
+            data, secretaire_id=_user_id(user)
         )
     except Exception as e:
         _handle_error(e, "ordre_mission")
@@ -329,9 +331,10 @@ async def deposer_fiche_constat(
     """
     svc = _get_service(db)
     try:
-        return await svc.deposer_fiche_constat(
-            str(ccfm_id), payload, topographe_id=_user_id(user)
-        )
+        data = dict(payload) if payload else {}
+        data["ccfm_id"] = str(ccfm_id)
+        data["topographe_id"] = _user_id(user)
+        return await svc.deposer_fiche_constat(data)
     except Exception as e:
         _handle_error(e, "fiche_constat")
 
@@ -376,8 +379,10 @@ async def valider_et_signer(
     """
     svc = _get_service(db)
     try:
+        data = dict(payload) if payload else {}
+        data["ccfm_id"] = str(ccfm_id)
         return await svc.valider_et_signer(
-            str(ccfm_id), payload, directeur_id=_user_id(user)
+            data, directeur_id=_user_id(user)
         )
     except Exception as e:
         _handle_error(e, "valider_et_signer")
@@ -427,7 +432,7 @@ async def marquer_retrait(
     """Étape 7c — Archiviste confirme le retrait physique du certificat. → RETIRE"""
     svc = _get_service(db)
     try:
-        return await svc.marquer_retrait(str(ccfm_id), archiviste_id=_user_id(user))
+        return await svc.marquer_retrait(str(ccfm_id))
     except Exception as e:
         _handle_error(e, "marquer_retrait")
 

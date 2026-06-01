@@ -33,19 +33,23 @@ from sqlalchemy import select, and_, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import require_role, get_current_user
+from app.core.security import (require_role, get_current_user,
+    calculate_sha256, ROLES_NOTAIRES, ROLES_READ_ALL)
 from app.models.droits_fonciers import (
     NotaryRegistry, PropertyTransfer, TypeTransfert,
+)
+from app.models.notaire import (
+    EtudeNotariale, MutationDossier, Succession,
+    SuccessionParcelle, SuccessionHeritier
 )
 from app.services.droits_service import DroitVersionService
 from app.services.workflow_orchestrator import TransactionGate
 
 router = APIRouter(prefix="/notaire", tags=["Notaire — Actes fonciers"])
 
-ROLES_NOTAIRE  = ["ADMIN", "NOTAIRE"]
-ROLES_READ     = ["ADMIN", "NOTAIRE", "DIRECTEUR_CADASTRE", "ADMIN_CADASTRE",
-                  "CHEF_CCFM", "BANQ_DIRECTEUR", "AUDITEUR",
-                  "DIRECTEUR_DOMAINE", "JUGE_FONCIER"]
+ROLES_NOTAIRE = ROLES_NOTAIRES
+ROLES_READ    = ROLES_READ_ALL
+
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -106,10 +110,8 @@ class EtudeNotarialeIn(BaseModel):
     date_agrement: str = Field(..., description="YYYY-MM-DD")
 
 
-def _sha(*parts) -> str:
-    return hashlib.sha256(
-        "|".join(str(p) for p in parts).encode()
-    ).hexdigest()
+_sha = calculate_sha256
+
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -270,29 +272,27 @@ async def creer_etude_notariale(
     )),
 ):
     """Enregistre une étude notariale agréée (migration 020)."""
-    etude_id = str(uuid.uuid4())
+    etude_id = uuid.uuid4()
     try:
-        await db.execute(text("""
-            INSERT INTO etude_notariale
-                (id, numero_parquet, nom_etude, adresse, commune_id,
-                 chambre_regionale, statut, date_agrement, created_at)
-            VALUES
-                (:id,:parquet,:nom,:adr,:cid,
-                 :chambre,'active',:date,NOW())
-        """), {
-            "id": etude_id, "parquet": payload.numero_parquet,
-            "nom": payload.nom_etude, "adr": payload.adresse,
-            "cid": payload.commune_id, "chambre": payload.chambre_regionale,
-            "date": payload.date_agrement,
-        })
+        etude = EtudeNotariale(
+            id=etude_id,
+            numero_parquet=payload.numero_parquet,
+            nom_etude=payload.nom_etude,
+            adresse=payload.adresse,
+            commune_id=uuid.UUID(payload.commune_id) if payload.commune_id else None,
+            chambre_regionale=payload.chambre_regionale,
+            statut="active",
+            date_agrement=payload.date_agrement,
+        )
+        db.add(etude)
         await db.commit()
     except Exception as e:
         await db.rollback()
-        if "uq_etude_parquet" in str(e):
+        if "uq_etude_parquet" in str(e) or "numero_parquet" in str(e):
             raise HTTPException(409,
                 f"Numéro de parquet {payload.numero_parquet} déjà utilisé")
         raise HTTPException(400, str(e)[:200])
-    return {"id": etude_id, "numero_parquet": payload.numero_parquet,
+    return {"id": str(etude_id), "numero_parquet": payload.numero_parquet,
             "statut": "active"}
 
 
@@ -494,7 +494,7 @@ async def ouvrir_mutation_dossier(
 
     sha = _sha(payload.parcelle_id, payload.type_mutation,
                payload.cedant_id, payload.acquereur_id)
-    dos_id = str(uuid.uuid4())
+    dos_id = uuid.uuid4()
 
     # Récupérer notaire
     r = await db.execute(
@@ -508,29 +508,22 @@ async def ouvrir_mutation_dossier(
         raise HTTPException(403, "Notaire agréé requis")
 
     try:
-        await db.execute(text("""
-            INSERT INTO mutation_dossier
-                (id, parcelle_id, rnp_parcelle_id, type_mutation,
-                 cedant_id, acquereur_id, pourcentage_cede, prix_fcfa,
-                 statut, notaire_id, ccfm_validation_id,
-                 sha256_dossier, cree_par, created_at)
-            VALUES
-                (:id,:parc,:rnp,:type,
-                 :cedant,:acq,:pct,:prix,
-                 'initie',:nid,:ccfm,
-                 :sha,:uid,NOW())
-        """), {
-            "id": dos_id, "parc": payload.parcelle_id,
-            "rnp": payload.rnp_parcelle_id,
-            "type": payload.type_mutation,
-            "cedant": payload.cedant_id,
-            "acq": payload.acquereur_id,
-            "pct": payload.pourcentage_cede,
-            "prix": payload.prix_fcfa,
-            "nid": str(notaire.id),
-            "ccfm": payload.nus_ccfm,
-            "sha": sha, "uid": str(current_user.id),
-        })
+        dossier = MutationDossier(
+            id=dos_id,
+            parcelle_id=uuid.UUID(payload.parcelle_id),
+            rnp_parcelle_id=uuid.UUID(payload.rnp_parcelle_id),
+            type_mutation=payload.type_mutation,
+            cedant_id=uuid.UUID(payload.cedant_id),
+            acquereur_id=uuid.UUID(payload.acquereur_id),
+            pourcentage_cede=payload.pourcentage_cede,
+            prix_fcfa=payload.prix_fcfa,
+            statut="initie",
+            notaire_id=notaire.id,
+            ccfm_validation_id=payload.nus_ccfm,
+            sha256_dossier=sha,
+            cree_par=current_user.id,
+        )
+        db.add(dossier)
         await db.commit()
     except Exception as e:
         await db.rollback()
@@ -539,7 +532,7 @@ async def ouvrir_mutation_dossier(
                 f"Mutation bloquée (tg_wl5) : {str(e)[:300]}")
         raise HTTPException(400, str(e)[:200])
 
-    return {"id": dos_id, "statut": "initie",
+    return {"id": str(dos_id), "statut": "initie",
             "sha256_dossier": sha, "notaire": notaire.nom_notaire}
 
 
@@ -631,35 +624,32 @@ async def ouvrir_succession(
 
     sha = _sha(payload.de_cujus_id, payload.type_succession,
                payload.date_ouverture.isoformat())
-    succ_id = str(uuid.uuid4())
+    succ_id = uuid.uuid4()
 
     try:
-        await db.execute(text("""
-            INSERT INTO succession
-                (id, de_cujus_id, type_succession, statut,
-                 date_ouverture, reference_acte,
-                 sha256_succession, cree_par, created_at)
-            VALUES
-                (:id,:dcj,:type,'ouverte',
-                 :date,:ref,:sha,:uid,NOW())
-        """), {
-            "id": succ_id, "dcj": payload.de_cujus_id,
-            "type": payload.type_succession,
-            "date": payload.date_ouverture,
-            "ref": payload.reference_acte,
-            "sha": sha, "uid": str(current_user.id),
-        })
+        succession = Succession(
+            id=succ_id,
+            de_cujus_id=uuid.UUID(payload.de_cujus_id),
+            type_succession=payload.type_succession,
+            statut="ouverte",
+            date_ouverture=payload.date_ouverture,
+            reference_acte=payload.reference_acte,
+            sha256_succession=sha,
+            cree_par=current_user.id,
+        )
+        db.add(succession)
 
         # Rattacher les parcelles
         for parc_id in payload.parcelles_ids:
             try:
-                await db.execute(text("""
-                    INSERT INTO succession_parcelle
-                        (id,succession_id,parcelle_id,en_indivision,created_at)
-                    VALUES
-                        (gen_random_uuid(),:sid,:pid,true,NOW())
-                    ON CONFLICT (succession_id,parcelle_id) DO NOTHING
-                """), {"sid": succ_id, "pid": parc_id})
+                sp = SuccessionParcelle(
+                    id=uuid.uuid4(),
+                    succession_id=succ_id,
+                    parcelle_id=uuid.UUID(parc_id),
+                    en_indivision=True,
+                    est_traite=False,
+                )
+                db.add(sp)
             except Exception:
                 pass
 
@@ -669,7 +659,7 @@ async def ouvrir_succession(
         raise HTTPException(400, str(e)[:200])
 
     return {
-        "id": succ_id,
+        "id": str(succ_id),
         "type_succession": payload.type_succession,
         "statut": "ouverte",
         "sha256_succession": sha,
@@ -778,17 +768,15 @@ async def ajouter_heritier(
         raise HTTPException(422, f"lien_parente : {LIENS}")
 
     try:
-        await db.execute(text("""
-            INSERT INTO succession_heritier
-                (id,succession_id,heritier_id,lien_parente,
-                 part_pct,a_accepte,created_at)
-            VALUES
-                (gen_random_uuid(),:sid,:hid,:lien,
-                 :pct,false,NOW())
-        """), {
-            "sid": succ_id, "hid": payload.heritier_id,
-            "lien": payload.lien_parente, "pct": payload.part_pct,
-        })
+        heritier = SuccessionHeritier(
+            id=uuid.uuid4(),
+            succession_id=uuid.UUID(succ_id),
+            heritier_id=uuid.UUID(payload.heritier_id),
+            lien_parente=payload.lien_parente,
+            part_pct=payload.part_pct,
+            a_accepte=False,
+        )
+        db.add(heritier)
         await db.commit()
     except Exception as e:
         await db.rollback()
