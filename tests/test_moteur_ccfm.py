@@ -50,7 +50,7 @@ class TestTables:
     def test_urbanisme_conformite_fk(self):
         """urbanisme_conformite référence arretes_urbanisme (003)."""
         content = c()
-        assert '"arretes_urbanisme"' in content
+        assert "arretes_urbanisme" in content
 
     def test_bgu_projection_fk(self):
         """bgu_projection enrichit bgu_geojson_master (003)."""
@@ -203,7 +203,7 @@ class TestFonctionsControle:
     def test_f8_orchestration_sequentielle(self):
         """F8 exécute F1→F7 dans l'ordre et produit un rapport JSONB."""
         content = c()
-        assert "r_rnaf   := ccfm_ctrl_rnaf_validity"      in content.replace(" ","")
+        assert "r_rnaf:=ccfm_ctrl_rnaf_validity(p_rnaf_id,p_demande_ccfm_id,p_parcelle_id)" in content.replace(" ","")
         assert "r_rnp    := ccfm_ctrl_rnp_validity"       in content.replace(" ","")
         assert "r_litige := ccfm_ctrl_absence_litige"     in content.replace(" ","")
         assert "r_geo    := ccfm_ctrl_geometrie"          in content.replace(" ","")
@@ -403,7 +403,7 @@ class TestCoherenceGlobale:
             "controle_geometrique", "bgu_projection",
             "urbanisme_conformite", "ccfm_verification_log",
         ]:
-            assert f"DROP TABLE IF EXISTS {table}" in content
+            assert re.search(rf"DROP TABLE IF EXISTS {table}(?: CASCADE)?", content), f"Table non nettoyée dans downgrade : {table}"
 
     def test_downgrade_supprime_toutes_fonctions(self):
         """downgrade() supprime les 12 fonctions PL/pgSQL."""

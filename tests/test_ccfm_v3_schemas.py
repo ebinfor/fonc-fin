@@ -4,6 +4,7 @@ FONCIER+ — Tests schemas Pydantic ccfm_v3 et WF30-33
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
 import pytest
+from pydantic import Field
 
 try:
     from app.api.v1.endpoints.ccfm_v3 import (
