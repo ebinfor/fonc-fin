@@ -339,7 +339,6 @@ class ParcelRightVersion(Base):
 
     # Relations
     titulaire          = relationship("RightHolder", foreign_keys=[titulaire_id])
-    acte_notarie       = relationship("ActeNotarie", foreign_keys=[acte_notarie_id])
     version_precedente = relationship("ParcelRightVersion",
                                        foreign_keys=[version_precedente_id],
                                        remote_side=[id])

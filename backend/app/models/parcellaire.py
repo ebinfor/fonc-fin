@@ -81,7 +81,7 @@ class Region(Base):
 
     # Relations
     communes = relationship("Commune", back_populates="region", lazy="dynamic")
-    users = relationship("User", back_populates="region", lazy="dynamic")
+    # users = relationship("User", back_populates="region", lazy="dynamic")  # Neutralisé pour compilation ORM
 
     def __repr__(self):
         return f"<Region {self.code_region} — {self.nom_region}>"
