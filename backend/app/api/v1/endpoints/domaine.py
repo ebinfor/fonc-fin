@@ -36,6 +36,7 @@ ROLES_LARGE = ["ADMIN", "DIRECTEUR_DOMAINE", "AGENT_DOMAINE",
 # ══════════════════════════════════════════════════════════════════
 
 # WF11
+_ROLES_LECTURE_DOMAINE = ["ADMIN", "DIRECTEUR_DOMAINE", "AGENT_DOMAINE"]
 class ProjetPublicIn(BaseModel):
     nom_projet: str = Field(..., min_length=3)
     type_projet: str = Field(...,
@@ -45,6 +46,7 @@ class ProjetPublicIn(BaseModel):
     budget_fcfa: Optional[float] = None
     date_fin_prevue: Optional[datetime] = None
 
+_ROLES_LECTURE_DOMAINE = ["ADMIN", "DIRECTEUR_DOMAINE", "AGENT_DOMAINE"]
 class ExproprierIn(BaseModel):
     projet_id: str
     parcelle_id: str
@@ -52,6 +54,7 @@ class ExproprierIn(BaseModel):
     surface_expropriee_m2: float = Field(..., gt=0)
     est_partielle: bool = False
 
+_ROLES_LECTURE_DOMAINE = ["ADMIN", "DIRECTEUR_DOMAINE", "AGENT_DOMAINE"]
 class EvaluationIn(BaseModel):
     valeur_officielle_fcfa: float = Field(..., gt=0)
     valeur_marche_fcfa: Optional[float] = Field(None, gt=0,
@@ -59,12 +62,14 @@ class EvaluationIn(BaseModel):
     indemnite_proposee_fcfa: float = Field(..., gt=0)
     expert_evaluateur: str
 
+_ROLES_LECTURE_DOMAINE = ["ADMIN", "DIRECTEUR_DOMAINE", "AGENT_DOMAINE"]
 class PaiementIn(BaseModel):
     evaluation_id: str
     montant_verse_fcfa: float = Field(..., gt=0)
     mode_paiement: str = Field(..., description="virement|cheque|numeraire")
     reference_paiement: str
 
+_ROLES_LECTURE_DOMAINE = ["ADMIN", "DIRECTEUR_DOMAINE", "AGENT_DOMAINE"]
 class ContestationExpIn(BaseModel):
     contestataire_id: str
     motif: str = Field(..., min_length=10)
@@ -72,12 +77,14 @@ class ContestationExpIn(BaseModel):
         description="indemnisation_insuffisante|utilite_non_prouvee|procedure_irreguliere")
 
 # WF12
+_ROLES_LECTURE_DOMAINE = ["ADMIN", "DIRECTEUR_DOMAINE", "AGENT_DOMAINE"]
 class DemandeRegIn(BaseModel):
     occupant_id: str
     surface_m2: float = Field(..., gt=0)
     date_occupation: Optional[datetime] = None
     geom_wkt: Optional[str] = None
 
+_ROLES_LECTURE_DOMAINE = ["ADMIN", "DIRECTEUR_DOMAINE", "AGENT_DOMAINE"]
 class EnqueteIn(BaseModel):
     """Enquête terrain sur une régularisation."""
     date_enquete:       datetime = Field(...,
@@ -89,6 +96,7 @@ class EnqueteIn(BaseModel):
     recommandation:     str      = Field(...,
         pattern="^(valider|rejeter|approfondir)$")
 
+_ROLES_LECTURE_DOMAINE = ["ADMIN", "DIRECTEUR_DOMAINE", "AGENT_DOMAINE"]
 class ArreteRegIn(BaseModel):
     """Arrêté de régularisation foncière."""
     numero_arrete: str      = Field(..., min_length=3,
@@ -96,6 +104,7 @@ class ArreteRegIn(BaseModel):
     date_arrete:   datetime = Field(...,
         description="Date de signature de l'arrêté")
 
+_ROLES_LECTURE_DOMAINE = ["ADMIN", "DIRECTEUR_DOMAINE", "AGENT_DOMAINE"]
 class AttributionPropIn(BaseModel):
     """Attribution d'une propriété régularisée."""
     arrete_reg_id:   str = Field(..., min_length=3,
@@ -105,6 +114,7 @@ class AttributionPropIn(BaseModel):
     parcelle_id:     str = Field(..., min_length=3,
         description="UUID de la parcelle attribuée")
 
+_ROLES_LECTURE_DOMAINE = ["ADMIN", "DIRECTEUR_DOMAINE", "AGENT_DOMAINE"]
 class ConflitFoncierIn(BaseModel):
     type_conflit: str = Field(...,
         description="limite_parcelle|propriete_disputee|heritage_conteste|"
@@ -115,6 +125,7 @@ class ConflitFoncierIn(BaseModel):
     parcelles_ids: List[str] = Field(default=[],
         description="UUIDs des parcelles impliquées")
 
+_ROLES_LECTURE_DOMAINE = ["ADMIN", "DIRECTEUR_DOMAINE", "AGENT_DOMAINE"]
 class MediationIn(BaseModel):
     """Résultat d'une médiation foncière."""
     date_mediation:  datetime     = Field(...,
@@ -124,6 +135,7 @@ class MediationIn(BaseModel):
     termes_accord:   Optional[str] = Field(None, min_length=10,
         description="Termes de l'accord — min 10 caractères si accord trouvé")
 
+_ROLES_LECTURE_DOMAINE = ["ADMIN", "DIRECTEUR_DOMAINE", "AGENT_DOMAINE"]
 class DecisionConflitIn(BaseModel):
     type_decision: str = Field(...,
         description="mediation_reussie|jugement|classement|accord_amiable")
@@ -132,6 +144,7 @@ class DecisionConflitIn(BaseModel):
     gel_leve: bool = False
 
 # WF14
+_ROLES_LECTURE_DOMAINE = ["ADMIN", "DIRECTEUR_DOMAINE", "AGENT_DOMAINE"]
 class EtudeTechniqueIn(BaseModel):
     lotissement_id: str
     bureau_etudes: str
@@ -143,6 +156,7 @@ class EtudeTechniqueIn(BaseModel):
         description='Surface en m² — doit être >= 0')
     densite_prevue: Optional[int] = None
 
+_ROLES_LECTURE_DOMAINE = ["ADMIN", "DIRECTEUR_DOMAINE", "AGENT_DOMAINE"]
 class ReservePubliqueIn(BaseModel):
     lotissement_id: str
     type_reserve: str = Field(...,
@@ -151,6 +165,7 @@ class ReservePubliqueIn(BaseModel):
     gestionnaire: Optional[str] = None
     geom_wkt: Optional[str] = None
 
+_ROLES_LECTURE_DOMAINE = ["ADMIN", "DIRECTEUR_DOMAINE", "AGENT_DOMAINE"]
 class AttributionLotIn(BaseModel):
     lot_id: str
     beneficiaire_id: str
@@ -159,6 +174,7 @@ class AttributionLotIn(BaseModel):
         description='Prix d attribution en FCFA — 0 si gratuit')
     paiement_ref: Optional[str] = None
 
+_ROLES_LECTURE_DOMAINE = ["ADMIN", "DIRECTEUR_DOMAINE", "AGENT_DOMAINE"]
 class FinancementIn(BaseModel):
     lotissement_id: str
     bailleur: str
@@ -168,6 +184,7 @@ class FinancementIn(BaseModel):
     date_accord: Optional[datetime] = None
 
 # WF15
+_ROLES_LECTURE_DOMAINE = ["ADMIN", "DIRECTEUR_DOMAINE", "AGENT_DOMAINE"]
 class ZoneSpecialeIn(BaseModel):
     code_zone: str = Field(..., min_length=3)
     nom_zone: str = Field(..., min_length=3)
@@ -180,6 +197,7 @@ class ZoneSpecialeIn(BaseModel):
         description='Surface en hectares — doit être > 0')
     geom_wkt: Optional[str] = None
 
+_ROLES_LECTURE_DOMAINE = ["ADMIN", "DIRECTEUR_DOMAINE", "AGENT_DOMAINE"]
 class RegleZoneIn(BaseModel):
     """Règle de zonage applicable dans une zone spéciale."""
     zone_id:            str           = Field(..., min_length=3,
@@ -192,6 +210,7 @@ class RegleZoneIn(BaseModel):
         pattern="^(CONSTRUCTION|USAGE|SURFACE|HAUTEUR|RETRAIT|AUTRE)$")
     operations_visees:  Optional[List[str]] = None
 
+_ROLES_LECTURE_DOMAINE = ["ADMIN", "DIRECTEUR_DOMAINE", "AGENT_DOMAINE"]
 class InfractionZoneIn(BaseModel):
     """Signaler une infraction dans une zone réglementée."""
     zone_id:     str = Field(..., description="UUID de la zone spéciale concernée")

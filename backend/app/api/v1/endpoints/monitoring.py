@@ -1,3 +1,4 @@
+from pydantic import Field
 """
 Filtrage acteur : module admin/public — ScopeFilter non applicable.
 

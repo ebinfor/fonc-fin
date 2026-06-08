@@ -1,41 +1,58 @@
-from logging.config import fileConfig
 import asyncio
+from logging.config import fileConfig
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 from alembic import context
+
+# Importer la configuration et les modèles
 from app.core.config import get_settings
+from app.core.database import Base
+import app.models  # Forcer le chargement des modèles
 
-config = context.config
 settings = get_settings()
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
-if config.config_file_name:
+config = context.config
+
+if config.config_file_name is not None:
     fileConfig(config.config_file_name)
-target_metadata = None
-try:
-    from app.core.database import Base
-    import app.models.parcellaire, app.models.droits_fonciers
-    import app.models.workflows, app.models.workflow_engine, app.models.users
-    target_metadata = Base.metadata
-except ImportError:
-    pass
 
-def do_run(connection):
-    context.configure(connection=connection, target_metadata=target_metadata)
+config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+target_metadata = Base.metadata
+
+def run_migrations_offline() -> None:
+    """Run migrations in 'offline' mode."""
+    url = config.get_main_option("sqlalchemy.url")
+    context.configure(
+        url=url,
+        target_metadata=target_metadata,
+        literal_binds=True,
+        dialect_opts={"paramstyle": "named"},
+    )
+
     with context.begin_transaction():
         context.run_migrations()
 
-async def run_async():
-    connectable = async_engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.", poolclass=pool.NullPool)
-    async with connectable.connect() as conn:
-        await conn.run_sync(do_run)
-    await connectable.dispose()
+def do_run_migrations(connection):
+    # Filtrer les tables géographiques PostGIS inutiles sur SQLite
+    def include_object(object, name, type_, reflected, compare_to):
+        if type_ == "table" and ("postgis" in name or "spatial_ref_sys" in name):
+            return False
+        return True
 
-if context.is_offline_mode():
-    context.configure(url=settings.DATABASE_URL, target_metadata=target_metadata,
-                      literal_binds=True)
-    with context.begin_transaction():
-        context.run_migrations()
-else:
-    asyncio.run(run_async())
+    context.configure(
+        connection=connection, 
+        target_metadata=target_metadata,
+        include_object=include_object
+    )
+
+    # Intercepter et neutraliser le SQL brut de type 'CREATE EXTENSION'
+   # Intercepter et neutraliser le SQL brut incompatible avec SQLite
+    orig_execute = connection.execute
+    def sqlite_safe_execute(statement, *args, **kwargs):
+        stmt_str = str(statement).lower()
+        # On bloque les extensions, les blocs DO $$ et les déclarations de TYPE ENUM
+        if connection.dialect.name == "sqlite" and any(x in stmt_str for x in ["extension", "postgis", "do $$", "create type"]):
+            from sqlalchemy import text
+            return orig_execute(text("SELECT 1;"), *args, **kwargs)
+        return orig_execute(statement, *args, **kwargs)
+    
+    connection.execute = sqlite_safe_execute

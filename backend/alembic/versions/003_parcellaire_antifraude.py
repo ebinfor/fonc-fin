@@ -28,49 +28,49 @@ def upgrade() -> None:
     op.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
 
     # ── ENUM types ──────────────────────────────────────────────────────────
-    op.execute("""
-        DO $$ BEGIN
-            CREATE TYPE statut_lotissement AS ENUM ('actif','refonte','archive');
-            EXCEPTION WHEN duplicate_object THEN NULL;
-        END $$;
-    """)
-    op.execute("""
-        DO $$ BEGIN
-            CREATE TYPE statut_parcelle AS ENUM
-                ('active','subdivisee','ancienne','annule','archive','en_attente_validation');
-            EXCEPTION WHEN duplicate_object THEN NULL;
-        END $$;
-    """)
-    op.execute("""
-        DO $$ BEGIN
-            CREATE TYPE statut_version AS ENUM ('active','archive');
-            EXCEPTION WHEN duplicate_object THEN NULL;
-        END $$;
-    """)
-    op.execute("""
-        DO $$ BEGIN
-            CREATE TYPE type_conflit AS ENUM ('superposition','deplacement','surface','incoherence');
-            EXCEPTION WHEN duplicate_object THEN NULL;
-        END $$;
-    """)
-    op.execute("""
-        DO $$ BEGIN
-            CREATE TYPE gravite_conflit AS ENUM ('critique','a_verifier');
-            EXCEPTION WHEN duplicate_object THEN NULL;
-        END $$;
-    """)
-    op.execute("""
-        DO $$ BEGIN
-            CREATE TYPE statut_conflit AS ENUM ('ouvert','en_traitement','resolu','bloque');
-            EXCEPTION WHEN duplicate_object THEN NULL;
-        END $$;
-    """)
-    op.execute("""
-        DO $$ BEGIN
-            CREATE TYPE type_commune AS ENUM ('urbaine','rurale');
-            EXCEPTION WHEN duplicate_object THEN NULL;
-        END $$;
-    """)
+  # op.execute("""
+    #     DO $$ BEGIN
+    #         CREATE TYPE statut_lotissement AS ENUM ('actif','refonte','archive');
+    #         EXCEPTION WHEN duplicate_object THEN NULL;
+    #     END $$;
+    # """)
+    # op.execute("""
+    #     DO $$ BEGIN
+    #         CREATE TYPE statut_parcelle AS ENUM
+    #             ('active','subdivisee','ancienne','annule','archive','en_attente_validation');
+    #         EXCEPTION WHEN duplicate_object THEN NULL;
+    #     END $$;
+    # """)
+    # op.execute("""
+    #     DO $$ BEGIN
+    #         CREATE TYPE statut_version AS ENUM ('active','archive');
+    #         EXCEPTION WHEN duplicate_object THEN NULL;
+    #     END $$;
+    # """)
+    # op.execute("""
+    #     DO $$ BEGIN
+    #         CREATE TYPE type_conflit AS ENUM ('superposition','deplacement','surface','incoherence');
+    #         EXCEPTION WHEN duplicate_object THEN NULL;
+    #     END $$;
+    # """)
+    # op.execute("""
+    #     DO $$ BEGIN
+    #         CREATE TYPE gravite_conflit AS ENUM ('critique','a_verifier');
+    #         EXCEPTION WHEN duplicate_object THEN NULL;
+    #     END $$;
+    # """)
+    # op.execute("""
+    #     DO $$ BEGIN
+    #         CREATE TYPE statut_conflit AS ENUM ('ouvert','en_traitement','resolu','bloque');
+    #         EXCEPTION WHEN duplicate_object THEN NULL;
+    #     END $$;
+    # """)
+    # op.execute("""
+    #     DO $$ BEGIN
+    #         CREATE TYPE type_commune AS ENUM ('urbaine','rurale');
+    #         EXCEPTION WHEN duplicate_object THEN NULL;
+    #     END $$;
+    # """)
 
     # ── 1. RÉGIONS ──────────────────────────────────────────────────────────
     op.create_table(

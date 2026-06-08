@@ -19,7 +19,7 @@ class TestTriggersVerrouillage:
     def test_tous_les_triggers_declares_dans_migration(self):
         """Tous les triggers critiques sont déclarés dans la migration 006."""
         content = open(
-            "/home/claude/foncier_v347/backend/alembic/versions/"
+            "backend/alembic/versions/"
             "006_schema_fondation_consolide.py"
         ).read()
         triggers_requis = [
@@ -38,7 +38,7 @@ class TestTriggersVerrouillage:
     def test_trigger_t1_rnp_sans_rnaf_publie(self):
         """T1 : Message d'erreur clair si RNAF non publié."""
         content = open(
-            "/home/claude/foncier_v347/backend/alembic/versions/"
+            "backend/alembic/versions/"
             "006_schema_fondation_consolide.py"
         ).read()
         assert "RNP BLOQUÉ" in content
@@ -48,7 +48,7 @@ class TestTriggersVerrouillage:
     def test_trigger_t2_acte_avec_hypotheque_active(self):
         """T2 : Blocage acte notarié si hypothèque active."""
         content = open(
-            "/home/claude/foncier_v347/backend/alembic/versions/"
+            "backend/alembic/versions/"
             "006_schema_fondation_consolide.py"
         ).read()
         assert "ACTE BLOQUÉ" in content
@@ -58,7 +58,7 @@ class TestTriggersVerrouillage:
     def test_trigger_t3_geom_sans_ccfm(self):
         """T3 : Modification géométrique impossible sans CCFM valide."""
         content = open(
-            "/home/claude/foncier_v347/backend/alembic/versions/"
+            "backend/alembic/versions/"
             "006_schema_fondation_consolide.py"
         ).read()
         assert "GÉOMÉTRIE BLOQUÉE" in content
@@ -68,7 +68,7 @@ class TestTriggersVerrouillage:
     def test_trigger_t4_transfert_avec_litige(self):
         """T4 : Transfert impossible si litige ouvert."""
         content = open(
-            "/home/claude/foncier_v347/backend/alembic/versions/"
+            "backend/alembic/versions/"
             "006_schema_fondation_consolide.py"
         ).read()
         assert "TRANSFERT BLOQUÉ" in content
@@ -78,7 +78,7 @@ class TestTriggersVerrouillage:
     def test_trigger_t5_jo_sans_rnaf_scelle(self):
         """T5 : Publication JO impossible si RNAF non scellé."""
         content = open(
-            "/home/claude/foncier_v347/backend/alembic/versions/"
+            "backend/alembic/versions/"
             "006_schema_fondation_consolide.py"
         ).read()
         assert "JOURNAL OFFICIEL BLOQUÉ" in content
@@ -88,7 +88,7 @@ class TestTriggersVerrouillage:
     def test_trigger_t6_contestation_ccfm_auto_block(self):
         """T6 : Contestation CCFM déclenche blocage automatique."""
         content = open(
-            "/home/claude/foncier_v347/backend/alembic/versions/"
+            "backend/alembic/versions/"
             "006_schema_fondation_consolide.py"
         ).read()
         assert "ccfm_contestation" in content
@@ -98,7 +98,7 @@ class TestTriggersVerrouillage:
     def test_trigger_t7_audit_tables_sensibles(self):
         """T7 : L'audit est appliqué sur toutes les tables sensibles."""
         content = open(
-            "/home/claude/foncier_v347/backend/alembic/versions/"
+            "backend/alembic/versions/"
             "006_schema_fondation_consolide.py"
         ).read()
         tables_auditees = [
@@ -116,7 +116,7 @@ class TestTriggersVerrouillage:
     def test_trigger_t8_version_rnaf_automatique(self):
         """T8 : Chaque changement de statut RNAF crée une version."""
         content = open(
-            "/home/claude/foncier_v347/backend/alembic/versions/"
+            "backend/alembic/versions/"
             "006_schema_fondation_consolide.py"
         ).read()
         assert "tg_auto_version_rnaf" in content
@@ -133,7 +133,7 @@ class TestRBACGranulaire:
     def test_29_roles_ont_permissions(self):
         """Les 29 rôles FONCIER+ ont des permissions définies."""
         content = open(
-            "/home/claude/foncier_v347/backend/alembic/versions/"
+            "backend/alembic/versions/"
             "006_schema_fondation_consolide.py"
         ).read()
         roles_critiques = [
@@ -151,7 +151,7 @@ class TestRBACGranulaire:
     def test_permissions_couvrent_operations_critiques(self):
         """Les permissions couvrent toutes les opérations critiques."""
         content = open(
-            "/home/claude/foncier_v347/backend/alembic/versions/"
+            "backend/alembic/versions/"
             "006_schema_fondation_consolide.py"
         ).read()
         permissions_critiques = [
@@ -171,7 +171,7 @@ class TestRBACGranulaire:
     def test_perimetre_requis_defini_par_permission(self):
         """Chaque permission a un périmètre géographique défini."""
         content = open(
-            "/home/claude/foncier_v347/backend/alembic/versions/"
+            "backend/alembic/versions/"
             "006_schema_fondation_consolide.py"
         ).read()
         assert "perimetre_requis" in content
@@ -182,7 +182,7 @@ class TestRBACGranulaire:
     def test_vue_rbac_permissions_effective(self):
         """La vue v_rbac_permissions intègre le périmètre géographique."""
         content = open(
-            "/home/claude/foncier_v347/backend/alembic/versions/"
+            "backend/alembic/versions/"
             "006_schema_fondation_consolide.py"
         ).read()
         assert "v_rbac_permissions" in content
@@ -199,7 +199,7 @@ class TestAuditGlobal:
     def test_audit_sensitive_ops_structure(self):
         """La table audit_sensitive_ops a tous les champs requis."""
         content = open(
-            "/home/claude/foncier_v347/backend/alembic/versions/"
+            "backend/alembic/versions/"
             "006_schema_fondation_consolide.py"
         ).read()
         champs_requis = [
@@ -217,7 +217,7 @@ class TestAuditGlobal:
     def test_audit_chaine_sha256(self):
         """L'audit enchaîne les SHA-256 (sha256_prev → chaîne inviolable)."""
         content = open(
-            "/home/claude/foncier_v347/backend/alembic/versions/"
+            "backend/alembic/versions/"
             "006_schema_fondation_consolide.py"
         ).read()
         assert "sha256_prev" in content
@@ -226,7 +226,7 @@ class TestAuditGlobal:
     def test_niveaux_criticite_definis(self):
         """Les niveaux de criticité couvrent toutes les situations."""
         content = open(
-            "/home/claude/foncier_v347/backend/alembic/versions/"
+            "backend/alembic/versions/"
             "006_schema_fondation_consolide.py"
         ).read()
         assert "'faible'" in content or "faible" in content
@@ -237,7 +237,7 @@ class TestAuditGlobal:
     def test_vue_audit_recent_critique(self):
         """La vue v_audit_recent_critique filtre sur 24h."""
         content = open(
-            "/home/claude/foncier_v347/backend/alembic/versions/"
+            "backend/alembic/versions/"
             "006_schema_fondation_consolide.py"
         ).read()
         assert "v_audit_recent_critique" in content
@@ -255,7 +255,7 @@ class TestRNAFVersionAudit:
     def test_rnaf_version_audit_structure(self):
         """rnaf_version_audit a les champs du spec."""
         content = open(
-            "/home/claude/foncier_v347/backend/alembic/versions/"
+            "backend/alembic/versions/"
             "006_schema_fondation_consolide.py"
         ).read()
         assert "rnaf_version_audit" in content
@@ -268,7 +268,7 @@ class TestRNAFVersionAudit:
     def test_version_unique_par_rnaf(self):
         """Contrainte d'unicité (rnaf_id, numero_version)."""
         content = open(
-            "/home/claude/foncier_v347/backend/alembic/versions/"
+            "backend/alembic/versions/"
             "006_schema_fondation_consolide.py"
         ).read()
         assert "uq_rnaf_version_num" in content
@@ -276,7 +276,7 @@ class TestRNAFVersionAudit:
     def test_trigger_cree_version_automatiquement(self):
         """Le trigger crée une version RNAF à chaque transition."""
         content = open(
-            "/home/claude/foncier_v347/backend/alembic/versions/"
+            "backend/alembic/versions/"
             "006_schema_fondation_consolide.py"
         ).read()
         assert "tg_auto_version_rnaf" in content
@@ -292,7 +292,7 @@ class TestCCFMContestation:
     def test_ccfm_contestation_structure(self):
         """ccfm_contestation a les champs du spec."""
         content = open(
-            "/home/claude/foncier_v347/backend/alembic/versions/"
+            "backend/alembic/versions/"
             "006_schema_fondation_consolide.py"
         ).read()
         assert "ccfm_contestation" in content
@@ -306,7 +306,7 @@ class TestCCFMContestation:
     def test_contestation_bloque_transactions_par_defaut(self):
         """Une contestation CCFM bloque les transactions par défaut."""
         content = open(
-            "/home/claude/foncier_v347/backend/alembic/versions/"
+            "backend/alembic/versions/"
             "006_schema_fondation_consolide.py"
         ).read()
         assert "bloque_transactions" in content
@@ -315,7 +315,7 @@ class TestCCFMContestation:
     def test_contestation_lie_decisions_judiciaires(self):
         """La contestation peut être liée à une décision judiciaire."""
         content = open(
-            "/home/claude/foncier_v347/backend/alembic/versions/"
+            "backend/alembic/versions/"
             "006_schema_fondation_consolide.py"
         ).read()
         assert "decisions_judiciaires" in content
@@ -330,7 +330,7 @@ class TestVueEtatParcelleComplet:
     def test_vue_couvre_toutes_sources(self):
         """v_etat_parcelle_complet intègre toutes les sources de blocage."""
         content = open(
-            "/home/claude/foncier_v347/backend/alembic/versions/"
+            "backend/alembic/versions/"
             "006_schema_fondation_consolide.py"
         ).read()
         sources_requises = [
@@ -351,7 +351,7 @@ class TestVueEtatParcelleComplet:
     def test_vue_expose_eligible_transaction(self):
         """La vue calcule l'éligibilité transaction globale."""
         content = open(
-            "/home/claude/foncier_v347/backend/alembic/versions/"
+            "backend/alembic/versions/"
             "006_schema_fondation_consolide.py"
         ).read()
         assert "eligible_transaction" in content
@@ -359,7 +359,7 @@ class TestVueEtatParcelleComplet:
     def test_analyse_gaps_combles(self):
         """Les 5 gaps identifiés par l'analyse sont tous comblés."""
         content = open(
-            "/home/claude/foncier_v347/backend/alembic/versions/"
+            "backend/alembic/versions/"
             "006_schema_fondation_consolide.py"
         ).read()
         # Gap 1 : rnaf_version_audit
@@ -382,7 +382,7 @@ class TestCoherenceGlobale:
     def test_aucun_delete_physique_dans_triggers(self):
         """Les triggers SQL ne font jamais de DELETE physique."""
         content = open(
-            "/home/claude/foncier_v347/backend/alembic/versions/"
+            "backend/alembic/versions/"
             "006_schema_fondation_consolide.py"
         ).read()
         # Extraire uniquement le contenu des fonctions PL/pgSQL
@@ -402,7 +402,7 @@ class TestCoherenceGlobale:
     def test_tous_raise_exception_ont_messages_clairs(self):
         """Tous les RAISE EXCEPTION ont des messages métier clairs."""
         content = open(
-            "/home/claude/foncier_v347/backend/alembic/versions/"
+            "backend/alembic/versions/"
             "006_schema_fondation_consolide.py"
         ).read()
         raises = [l.strip() for l in content.splitlines()
@@ -414,7 +414,7 @@ class TestCoherenceGlobale:
     def test_downgrade_nettoie_tout(self):
         """Le downgrade supprime toutes les créations de la migration."""
         content = open(
-            "/home/claude/foncier_v347/backend/alembic/versions/"
+            "backend/alembic/versions/"
             "006_schema_fondation_consolide.py"
         ).read()
         assert "def downgrade" in content

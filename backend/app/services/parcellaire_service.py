@@ -18,7 +18,7 @@ from app.models.parcellaire import (
     ParcelVersion, RefonteLotissement, StatutConflit, StatutParcelle,
     StatutVersion, TypeConflit,
 )
-from app.core.security import sha256_payload
+from app.core.security import calculate_sha256
 
 
 # ─────────────────────────────────────────────────────────────

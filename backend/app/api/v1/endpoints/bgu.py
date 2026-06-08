@@ -32,6 +32,7 @@ ROLES_READ = ["ADMIN","RESPONSABLE_BGU","AUDITEUR","NOTAIRE",
 
 # ─── Schémas ──────────────────────────────────────────────────────
 
+_ROLES_BGU_READ = ["ADMIN", "RESPONSABLE_BGU"]
 class BGUGeomCreateIn(BaseModel):
     parcelle_id: str = Field(..., min_length=3,
         description='UUID de la parcelle')
@@ -40,6 +41,7 @@ class BGUGeomCreateIn(BaseModel):
     geojson_id: Optional[str] = None  # Généré si absent
 
 
+_ROLES_BGU_READ = ["ADMIN", "RESPONSABLE_BGU"]
 class BGUGeomScellerIn(BaseModel):
     """Sceller une géométrie BGU (rendu immuable)."""
     blockchain_hash:    Optional[str] = Field(None, min_length=32,
@@ -47,6 +49,7 @@ class BGUGeomScellerIn(BaseModel):
     blockchain_network: str           = Field(default="internal",
         pattern="^(internal|ethereum|polygon|hyperledger)$")
 
+_ROLES_BGU_READ = ["ADMIN", "RESPONSABLE_BGU"]
 class BGUStatutUpdate(BaseModel):
     statut_public: str = Field(...,
         description="actif|suspendu|gele|annule|en_verification")

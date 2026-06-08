@@ -28,36 +28,37 @@ router = APIRouter(prefix="/urbanisme/rnaf", tags=["Urbanisme — RNAF — WF1"]
 
 # ─── Schémas ──────────────────────────────────────────────────────
 
+from datetime import datetime
+from typing import Optional, List
+from pydantic import BaseModel, Field, model_validator
+
+# 1. On déclare la constante UNE SEULE FOIS au niveau global (hors des classes)
+ROLES_RNAF = ["ADMIN", "CHEF_CCFM", "AGENT_CCFM"]
+
 class RNAFCreateIn(BaseModel):
     """Créer un workflow RNAF à partir d'un arrêté transmis au JO."""
     rnaf_id:           str           = Field(..., description="UUID de la table rnaf legacy")
     arrete_foncier_id: str           = Field(..., description="UUID de arretes_fonciers")
     commune_id:        Optional[str] = Field(None, description="UUID de la commune concernée")
-    region:            Optional[str] = Field(None,
-        description="Code région : NIA|ZDR|MAR|TAH|AGZ|DOS|TLW|DIL")
+    region:            Optional[str] = Field(None, description="Code région : NIA|ZDR|MAR|TAH|AGZ|DOS|TLW|DIL")
     jo_parution_id:    Optional[str] = Field(None, description="UUID de la parution JO")
-    nombre_parcelles:  Optional[int] = Field(None, ge=1,
-        description="Nombre de parcelles concernées")
-    surface_totale_ha: Optional[float] = Field(None, gt=0,
-        description="Surface totale en hectares")
+    nombre_parcelles:  Optional[int] = Field(None, ge=1, description="Nombre de parcelles concernées")
+    surface_totale_ha: Optional[float] = Field(None, gt=0, description="Surface totale en hectares")
 
 
 class RNAFAvancerIn(BaseModel):
     """Avancer le workflow RNAF à l'étape suivante."""
-    nouveau_statut:     str = Field(...,
-        pattern="^(en_instruction|publie|rejete|archive)$",
-        description="Nouveau statut du workflow RNAF")
-    motif:              str = Field(default="", min_length=0,
-        description="Motif de l'avancement")
-    publication_jo_id:  str = Field(default="",
-        description="UUID parution JO — obligatoire si nouveau_statut=publie")
+    nouveau_statut:     str = Field(..., pattern="^(en_instruction|publie|rejete|archive)$", description="Nouveau statut du workflow RNAF")
+    motif:              str = Field(default="", min_length=0, description="Motif de l'avancement")
+    publication_jo_id:  str = Field(default="", description="UUID parution JO — obligatoire si nouveau_statut=publie")
 
-    @validator("publication_jo_id")
-    def publie_necessite_jo(cls, v, values):
-        if values.get("nouveau_statut") == "publie" and not v:
-            raise ValueError(
-                "publication_jo_id obligatoire pour passer au statut PUBLIE")
-        return v
+    # Correction Pydantic V2 : Validation multi-champs (mode="after")
+    @model_validator(mode="after")
+    def publie_necessite_jo(self):
+        if self.nouveau_statut == "publie" and not self.publication_jo_id:
+            raise ValueError("publication_jo_id obligatoire pour passer au statut PUBLIE")
+        return self
+
 
 class JusticeDecisionIn(BaseModel):
     decision_judiciaire_id: str
@@ -67,28 +68,28 @@ class JusticeDecisionIn(BaseModel):
     annule_rnaf: bool = False
     degele_parcelles: bool = False
 
-    @validator("annule_rnaf")
-    def pas_les_deux(cls, v, values):
-        if v and values.get("retablit_rnaf"):
-            raise ValueError(
-                "retablit_rnaf et annule_rnaf sont mutuellement exclusifs"
-            )
-        return v
+    # Correction Pydantic V2 : Validation croisée propre
+    @model_validator(mode="after")
+    def pas_les_deux(self):
+        if self.annule_rnaf and self.retablit_rnaf:
+            raise ValueError("retablit_rnaf et annule_rnaf sont mutuellement exclusifs")
+        return self
 
 
 class RNAFOut(BaseModel):
     id: str
     rnaf_id: str
     statut: str
-    sha256_publie: Optional[str]
-    date_soumission: Optional[datetime]
-    date_publication: Optional[datetime]
-    date_suspension: Optional[datetime]
-    motif_suspension: Optional[str]
+    sha256_publie: Optional[str] = None
+    date_soumission: Optional[datetime] = None
+    date_publication: Optional[datetime] = None
+    date_suspension: Optional[datetime] = None
+    motif_suspension: Optional[str] = None
 
-    class Config:
-        from_attributes = True
-
+    # Correction Pydantic V2 : Configuration de l'ORM
+    model_config = {
+        "from_attributes": True
+    }
 
 # ─── CRUD de base ─────────────────────────────────────────────────
 

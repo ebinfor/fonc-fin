@@ -216,7 +216,7 @@ class TestRequeteTemporelle:
         """L'index composite temporal est critique pour les requêtes historiques."""
         # Documentaire — vérifie que les champs clés sont indexés dans la migration
         import os
-        migration_path = "/home/claude/foncier_v347/backend/alembic/versions/005_droits_fonciers_versiones.py"
+        migration_path = "backend/alembic/versions/005_droits_fonciers_versiones.py"
         if os.path.exists(migration_path):
             content = open(migration_path).read()
             assert "ix_prv_temporal" in content
@@ -396,7 +396,7 @@ class TestANNFRightArchive:
     def test_trigger_archive_automatique_documente(self):
         """Le trigger d'archivage automatique est dans la migration."""
         import os
-        migration_path = "/home/claude/foncier_v347/backend/alembic/versions/005_droits_fonciers_versiones.py"
+        migration_path = "backend/alembic/versions/005_droits_fonciers_versiones.py"
         if os.path.exists(migration_path):
             content = open(migration_path).read()
             assert "tg_archive_right_on_close"  in content

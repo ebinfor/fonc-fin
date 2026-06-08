@@ -10,7 +10,7 @@ import re
 
 
 MIGRATION_PATH = (
-    "/home/claude/foncier_v347/backend/alembic/versions/"
+    "backend/alembic/versions/"
     "008_workflows_operationnels.py"
 )
 

@@ -9,7 +9,7 @@ import pytest
 import re
 
 MIG = (
-    "/home/claude/foncier_v347/backend/alembic/versions/"
+    "backend/alembic/versions/"
     "010_workflow_annulation_et_fusion.py"
 )
 

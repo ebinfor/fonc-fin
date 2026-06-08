@@ -1,3 +1,4 @@
+from typing import Optional
 """
 Filtrage acteur : module admin/public — ScopeFilter non applicable.
 FONCIER+ — Auth JWT"""

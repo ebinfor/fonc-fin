@@ -31,7 +31,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # Runtime libs uniquement
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpq5 libgeos3.12.0 libproj25 curl \
+    libpq5 \
+    libgeos-dev \
+    libproj-dev \
+    curl \
     && rm -rf /var/lib/apt/lists/* \
     && addgroup --system foncier \
     && adduser  --system --ingroup foncier --no-create-home foncier
