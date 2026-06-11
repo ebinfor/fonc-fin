@@ -104,9 +104,13 @@ class WorkflowEngine:
         Démarre une instance de workflow pour une entité.
         Vérifie qu'aucune instance active n'existe déjà.
         """
-        # Récupérer la définition
+        # Récupérer la définition avec chargement asynchrone des étapes
+        from sqlalchemy.orm import selectinload
+
         def_result = await db.execute(
-            select(WorkflowDefinition).where(
+            select(WorkflowDefinition)
+            .options(selectinload(WorkflowDefinition.etapes))
+            .where(
                 and_(
                     WorkflowDefinition.type_workflow == type_workflow,
                     WorkflowDefinition.is_active == True,

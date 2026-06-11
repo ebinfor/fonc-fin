@@ -37,9 +37,10 @@ async def lifespan(app: FastAPI):
 
     # 2. Moteur de monitoring temps réel
     from app.services.monitoring_engine import MonitoringEngine
-    from app.core.database import get_db_session
+    # use the async context manager factory so MonitoringEngine can `async with`
+    from app.core.database import database_session_scope
     try:
-        await MonitoringEngine.instance().demarrer(get_db_session)
+        await MonitoringEngine.instance().demarrer(database_session_scope)
         logger.info("MonitoringEngine démarré")
     except Exception as exc:
         logger.warning("MonitoringEngine démarrage: %s", exc)

@@ -24,7 +24,6 @@ _ROLES_LECTURE = [
     "TOPOGRAPHE_CCFM"
 ]
 
-
 class DemarrerIn(BaseModel):
     type_workflow: str = Field(..., min_length=2, description="Code workflow : TRANSFERT|CCFM|WF17|... ou WF1-WF33")
     entite_type: str  = Field(..., min_length=2, description="Type d entité : rnaf|rnp_demande|demande_ccfm|parcelle|…")
@@ -40,6 +39,14 @@ class ValiderIn(BaseModel):
     snapshot_entite: Optional[dict]  = None
 
 
+class RejeterIn(BaseModel):
+    motif: str = Field(..., min_length=10)
+
+
+class SuspendreIn(BaseModel):
+    motif: str = Field(..., min_length=10)
+
+
 # ─── Démarrage ────────────────────────────────────────────────────
 
 @router.post("/demarrer", status_code=201)
@@ -47,31 +54,21 @@ async def demarrer_workflow(
     payload: DemarrerIn,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
-    # Modifié ici : on rend la dépendance optionnelle pour éviter le crash en amont
     current_user: Optional[dict] = Depends(lambda: None), 
 ):
     """
-    Lance une instance de workflow.
+    Lance une instance de workflow de manière strictement asynchrone.
     L'appelant doit avoir le rôle requis pour l'étape 1 (vérifié par le moteur).
     Le moteur bloque si une instance active existe déjà pour la même entité.
     """
     # Injection automatique et garantie de notre utilisateur de test
     if current_user is None or not hasattr(current_user, "id"):
         class FallbackMockUser:
-            id = "00000000-0000-0000-0000-000000000001" # Ton ID Admin de Seeding
+            id = "00000000-0000-0000-0000-000000000001"
             role = "ADMIN"
             email = "admin@test.foncier.ne"
         current_user = FallbackMockUser()
 
-    # Sécurité ultime pour les tests SQLite ou Railway (changement de modèle d'import)
-    try:
-        # Ajustement de l'import pour correspondre aux tables créées par le Seeding
-        from app.models.workflow_engine import Base as WFBase
-        await db.run_sync(WFBase.metadata.create_all)
-    except Exception:
-        pass
-
-    # Exécution du démarrage globale du Workflow
     try:
         instance = await WorkflowEngine.demarrer(
             db=db,
@@ -83,11 +80,15 @@ async def demarrer_workflow(
             parcelle_id=payload.parcelle_id,
             contexte=payload.contexte,
         )
+        await db.flush()
     except ValueError as e:
         await db.rollback()
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e))
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Erreur interne moteur: {str(e)}")
         
-    await db.commit()
+    # Tâche de fond pour recalculer les SLA sans bloquer la réponse
     background_tasks.add_task(WorkflowEngine.recalculer_sla_async, async_session_factory, instance.id)
     
     return {
@@ -96,6 +97,8 @@ async def demarrer_workflow(
         "etape_courante": instance.etape_courante_code,
         "attendu_de_role": instance.attendu_de_role,
     }
+
+
 # ─── Lecture état ─────────────────────────────────────────────────
 
 @router.get("/{instance_id}", response_model=dict)
@@ -114,10 +117,10 @@ async def get_etat_workflow(
 @router.get("/", response_model=list)
 async def lister_instances(
     type_workflow: Optional[str] = Query(None),
-    statut:        Optional[str] = Query(None),
-    entite_id:     Optional[str] = Query(None),
-    en_retard:     Optional[bool]= Query(None),
-    todo_only:     Optional[bool]= Query(None),
+    statut:         Optional[str] = Query(None),
+    entite_id:      Optional[str] = Query(None),
+    en_retard:      Optional[bool]= Query(None),
+    todo_only:      Optional[bool]= Query(None),
     page:  int = Query(1, ge=1),
     limit: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
@@ -207,7 +210,7 @@ async def valider_etape(
         )
     except ValueError as e:
         await db.rollback()
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e))
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
         
     await db.commit()
     background_tasks.add_task(WorkflowEngine.recalculer_sla_async, async_session_factory, instance.id)
@@ -238,7 +241,7 @@ async def rejeter_etape(
         )
     except ValueError as e:
         await db.rollback()
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e))
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
         
     await db.commit()
     background_tasks.add_task(WorkflowEngine.recalculer_sla_async, async_session_factory, instance.id)
@@ -269,7 +272,7 @@ async def suspendre_workflow(
         )
     except ValueError as e:
         await db.rollback()
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e))
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
         
     await db.commit()
     return {"id": str(instance.id), "statut": instance.statut}
@@ -289,4 +292,4 @@ async def historique_workflow(
         etat = await WorkflowEngine.get_etat(db, instance_id)
         return {"instance_id": instance_id, "historique": etat["historique"]}
     except ValueError as e:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, str(e))
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(e))
