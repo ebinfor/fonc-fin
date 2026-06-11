@@ -887,11 +887,14 @@ class AlerteManager:
 
 async def _boucle(self) -> None:
         """Boucle principale : collecte → détection → alertes → diffusion."""
+        # On importe l'usine de session directement à l'intérieur pour éviter les imports circulaires
+        from app.core.database import AsyncSessionLocal
+
         while self._running:
             t_start = time.monotonic()
             try:
-                # db_factory() appelle get_db() qui est maintenant un magnifique asynccontextmanager
-                async with self._db_factory() as db:
+                # On ouvre une session propre et étanche pour le cycle de monitoring
+                async with AsyncSessionLocal() as db:
                     await self._cycle(db)
                     
             except asyncio.CancelledError:
@@ -903,7 +906,6 @@ async def _boucle(self) -> None:
             self._latences.append(elapsed * 1000)
             wait = max(0, POLL_INTERVAL_SEC - elapsed)
             await asyncio.sleep(wait)
-
         # Activité récente (fenêtre 5 min en mémoire)
         maintenant = time.monotonic()
         fenetre = maintenant - WINDOW_SHORT_SEC

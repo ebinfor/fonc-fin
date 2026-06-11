@@ -1,54 +1,18 @@
-import os
-from contextlib import asynccontextmanager
-from sqlalchemy.ext.asyncio import (
-    AsyncSession, async_sessionmaker, create_async_engine
-)
-from sqlalchemy.orm import declarative_base
+async def _boucle(self) -> None:
+        """Boucle principale : collecte → détection → alertes → diffusion."""
+        while self._running:
+            t_start = time.monotonic()
+            try:
+                # self._db_factory invoquera get_db_ctx qui gère parfaitement le "async with"
+                async with self._db_factory() as db:
+                    await self._cycle(db)
+                    
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                _log.warning("Monitoring cycle erreur: %s", exc)
 
-# 1. Connexion publique sécurisée Railway
-DATABASE_URL = "postgresql+asyncpg://postgres:VOFGKWzLrAYzjOYtdVlYoKrmhAFwGiDY@hopper.proxy.rlwy.net:21510/railway"
-
-# 2. Création du moteur asynchrone
-engine = create_async_engine(
-    DATABASE_URL,
-    echo=False,
-    future=True,
-    pool_pre_ping=True,
-    pool_size=10,
-    max_overflow=20
-)
-
-# 3. Fabrique de sessions
-async_session_factory = async_sessionmaker(
-    bind=engine,
-    class_=AsyncSession,
-    expire_on_commit=False,
-    autocommit=False,
-    autoflush=False
-)
-
-# 4. Modèle déclaratif ORM
-Base = declarative_base()
-
-# 5. 🌟 LA SOLUTION UNIVERSELLE : Un vrai Context Manager utilisable partout
-@asynccontextmanager
-async def database_session_scope():
-    async with async_session_factory() as session:
-        try:
-            yield session
-            await session.commit()
-        except Exception:
-            await session.rollback()
-            raise
-
-# Dépendance pour FastAPI (Générateur asynchrone standard pour les routes)
-import contextlib
-# ... tes autres imports (engine, AsyncSessionLocal, etc.) ...
-
-@contextlib.asynccontextmanager
-async def get_db():
-    async with AsyncSessionLocal() as session:
-        try:
-            yield session
-        finally:
-            await session.close()
+            elapsed = time.monotonic() - t_start
+            self._latences.append(elapsed * 1000)
+            wait = max(0, POLL_INTERVAL_SEC - elapsed)
+            await asyncio.sleep(wait)
