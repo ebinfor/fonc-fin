@@ -887,26 +887,12 @@ class AlerteManager:
 
 async def _boucle(self) -> None:
         """Boucle principale : collecte → détection → alertes → diffusion."""
-        import contextlib  # Assure l'importation locale si nécessaire
-
         while self._running:
             t_start = time.monotonic()
             try:
-                db_ctx = self._db_factory()
-                
-                # Cas 1 : C'est déjà un gestionnaire de contexte asynchrone classique
-                if hasattr(db_ctx, "__aenter__"):
-                    async with db_ctx as db:
-                        await self._cycle(db)
-                        
-                # Cas 2 : C'est un générateur asynchrone (FastAPI style get_db)
-                elif hasattr(db_ctx, "__anext__") or hasattr(db_ctx, "asend"):
-                    # On l'enveloppe proprement pour en faire un contexte valide
-                    wrapper = contextlib.asynccontextmanager(lambda: db_ctx)
-                    async with wrapper() as db:
-                        await self._cycle(db)
-                else:
-                    _log.error("Le db_factory fourni n'est ni un contexte ni un générateur asynchrone.")
+                # db_factory() appelle get_db() qui est maintenant un magnifique asynccontextmanager
+                async with self._db_factory() as db:
+                    await self._cycle(db)
                     
             except asyncio.CancelledError:
                 break

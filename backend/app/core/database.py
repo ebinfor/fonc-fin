@@ -1,46 +1,38 @@
-"""FONCIER+ — Session async SQLAlchemy (FIX-08 : export engine explicite)"""
+import os
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
-from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
     AsyncSession, async_sessionmaker, create_async_engine
 )
-from sqlalchemy.orm import DeclarativeBase
-from sqlalchemy.pool import StaticPool
-from app.core.config import get_settings
+from sqlalchemy.orm import declarative_base
 
-settings = get_settings()
+# 1. Connexion publique sécurisée Railway
+DATABASE_URL = "postgresql+asyncpg://postgres:VOFGKWzLrAYzjOYtdVlYoKrmhAFwGiDY@hopper.proxy.rlwy.net:21510/railway"
 
-# Exporté explicitement pour admin.py health check
-is_sqlite_memory = settings.DATABASE_URL.startswith("sqlite") and ":memory:" in settings.DATABASE_URL
+# 2. Création du moteur asynchrone
 engine = create_async_engine(
-    settings.DATABASE_URL,
-    echo=settings.DEBUG,
-    connect_args={"check_same_thread": False} if is_sqlite_memory else {},
-    poolclass=StaticPool if is_sqlite_memory else None,
+    DATABASE_URL,
+    echo=False,
+    future=True,
+    pool_pre_ping=True,
+    pool_size=10,
+    max_overflow=20
 )
 
-# --- INTERCEPTEUR MAGIQUE POUR SQUEEZER POSTGIS SUR SQLITE ---
-@event.listens_for(engine.sync_engine, "before_cursor_execute")
-def cancel_extension(conn, cursor, statement, parameters, context, executing_style):
-    if "EXTENSION" in statement or "postgis" in statement:
-        # On remplace l'instruction PostgreSQL par un SELECT inoffensif pour SQLite
-        cursor.execute("SELECT 1;")
-
+# 3. Fabrique de sessions
 async_session_factory = async_sessionmaker(
-    engine, class_=AsyncSession, expire_on_commit=False
+    bind=engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+    autocommit=False,
+    autoflush=False
 )
 
+# 4. Modèle déclaratif ORM
+Base = declarative_base()
 
-class Base(DeclarativeBase):
-    """Base unique pour tous les modèles SQLAlchemy.
-    Importée par tous les fichiers app/models/*.py
-    """
-    pass
-
-
-async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    """FastAPI dependency — une session par requête HTTP."""
+# 5. 🌟 LA SOLUTION UNIVERSELLE : Un vrai Context Manager utilisable partout
+@asynccontextmanager
+async def database_session_scope():
     async with async_session_factory() as session:
         try:
             yield session
@@ -48,20 +40,15 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         except Exception:
             await session.rollback()
             raise
+
+# Dépendance pour FastAPI (Générateur asynchrone standard pour les routes)
+import contextlib
+# ... tes autres imports (engine, AsyncSessionLocal, etc.) ...
+
+@contextlib.asynccontextmanager
+async def get_db():
+    async with AsyncSessionLocal() as session:
+        try:
+            yield session
         finally:
             await session.close()
-
-
-@asynccontextmanager
-async def get_db_context():
-    """Context manager pour les scripts hors FastAPI (seed, migration, tests)."""
-    async with async_session_factory() as session:
-        try:
-            yield session
-            await session.commit()
-        except Exception:
-            await session.rollback()
-            raise
-
-# Alias pour le MonitoringEngine
-get_db_session = get_db_context
