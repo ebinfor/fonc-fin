@@ -885,80 +885,29 @@ class AlerteManager:
 # MOTEUR DE MONITORING PRINCIPAL
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-class MonitoringEngine:
-    """
-    Orchestrateur du monitoring temps réel.
-    Singleton — une seule instance par processus FastAPI.
-
-    Usage :
-        # Démarrage (lifespan FastAPI)
-        await MonitoringEngine.instance().demarrer(db_factory)
-
-        # Arrêt
-        await MonitoringEngine.instance().arreter()
-
-        # Abonnement SSE
-        queue = MonitoringEngine.instance().alertes.abonner()
-
-        # Tableau de bord
-        tb = await MonitoringEngine.instance().tableau_bord(db)
-    """
-
-    _instance: Optional["MonitoringEngine"] = None
-
-    @classmethod
-    def instance(cls) -> "MonitoringEngine":
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance
-
-    def __init__(self) -> None:
-        self.collecteur  = CollecteurEvenements()
-        self.alertes     = AlerteManager()
-        self.detecteurs: List[DetecteurBase] = [
-            D1_WorkflowBlockage(),
-            D2_Surcharge(),
-            D3_ConflitValidation(),
-            D4_AccesInhabituel(),
-            D5_RatioEchec(),
-            D6_VerrouCadeau(),
-        ]
-        # Buffer circulaire des événements récents
-        self._events: Deque[Evenement] = deque(maxlen=MAX_EVENTS_BUFFER)
-        self._running    = False
-        self._task:      Optional[asyncio.Task] = None
-        self._db_factory = None
-        # Statistiques internes
-        self._stats: Dict[str, int] = defaultdict(int)
-        self._latences: Deque[float] = deque(maxlen=100)
-
-    async def demarrer(self, db_factory) -> None:
-        """Démarre la boucle de monitoring asynchrone."""
-        if self._running:
-            return
-        self._db_factory = db_factory
-        self._running    = True
-        self._task       = asyncio.create_task(self._boucle())
-        _log.info("MonitoringEngine démarré (intervalle %ds)", POLL_INTERVAL_SEC)
-
-    async def arreter(self) -> None:
-        """Arrête proprement la boucle de monitoring."""
-        self._running = False
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-        _log.info("MonitoringEngine arrêté")
-
-    async def _boucle(self) -> None:
+async def _boucle(self) -> None:
         """Boucle principale : collecte → détection → alertes → diffusion."""
+        import contextlib  # Assure l'importation locale si nécessaire
+
         while self._running:
             t_start = time.monotonic()
             try:
-                async with self._db_factory() as db:
-                    await self._cycle(db)
+                db_ctx = self._db_factory()
+                
+                # Cas 1 : C'est déjà un gestionnaire de contexte asynchrone classique
+                if hasattr(db_ctx, "__aenter__"):
+                    async with db_ctx as db:
+                        await self._cycle(db)
+                        
+                # Cas 2 : C'est un générateur asynchrone (FastAPI style get_db)
+                elif hasattr(db_ctx, "__anext__") or hasattr(db_ctx, "asend"):
+                    # On l'enveloppe proprement pour en faire un contexte valide
+                    wrapper = contextlib.asynccontextmanager(lambda: db_ctx)
+                    async with wrapper() as db:
+                        await self._cycle(db)
+                else:
+                    _log.error("Le db_factory fourni n'est ni un contexte ni un générateur asynchrone.")
+                    
             except asyncio.CancelledError:
                 break
             except Exception as exc:
@@ -968,77 +917,6 @@ class MonitoringEngine:
             self._latences.append(elapsed * 1000)
             wait = max(0, POLL_INTERVAL_SEC - elapsed)
             await asyncio.sleep(wait)
-
-    async def _cycle(self, db) -> None:
-        """Un cycle complet : collecte + détection + alertes."""
-        # 1. Collecte des événements
-        nouveaux = await self.collecteur.collecter_tout(db)
-        for evt in nouveaux:
-            self._events.append(evt)
-            self._stats[evt.categorie.value] += 1
-
-        # 2. Diffusion des événements aux clients SSE
-        for evt in nouveaux:
-            await self.alertes.diffuser({
-                "type":    "evenement",
-                "payload": evt.as_dict(),
-            })
-
-        # 3. Détection des anomalies
-        alertes_actives = self.alertes.actives()
-        for detecteur in self.detecteurs:
-            try:
-                nouvelles_alertes = detecteur.analyser(
-                    self._events, alertes_actives
-                )
-                for alerte in nouvelles_alertes:
-                    self.alertes.ajouter(alerte)
-                    await self.alertes.persister(db, alerte)
-                    await self.alertes.diffuser({
-                        "type":    "alerte",
-                        "payload": alerte.as_dict(),
-                    })
-                    _log.info(
-                        "[%s] %s : %s",
-                        alerte.niveau.value, alerte.detecteur, alerte.titre
-                    )
-            except Exception as exc:
-                _log.debug("Détecteur %s erreur: %s", detecteur.id, exc)
-
-    async def tableau_bord(self, db) -> TableauBord:
-        """Construit le tableau de bord en temps réel depuis la DB."""
-        tb = TableauBord()
-
-        queries = {
-            "parcelles_actives": (
-                "SELECT COUNT(*) FROM parcelles WHERE statut='active'", {}
-            ),
-            "workflows_en_cours": (
-                "SELECT COUNT(*) FROM workflow_instances WHERE statut='en_cours'", {}
-            ),
-            "workflows_bloques": (
-                "SELECT COUNT(*) FROM workflow_instances WHERE statut='en_cours'"
-                " AND updated_at < NOW() - INTERVAL '2 hours'", {}
-            ),
-            "validations_en_attente": (
-                "SELECT COUNT(*) FROM validation_pipeline"
-                " WHERE statut NOT IN ('VALIDE','REJETE')", {}
-            ),
-            "verrous_actifs": (
-                "SELECT COUNT(*) FROM entity_lock"
-                " WHERE actif=TRUE AND (date_expiration IS NULL OR date_expiration>NOW())", {}
-            ),
-            "regles_actives": (
-                "SELECT COUNT(*) FROM regle_metier WHERE actif=TRUE AND sandbox_valide=TRUE", {}
-            ),
-        }
-
-        for attr, (sql, params) in queries.items():
-            try:
-                r = await db.execute(_text(sql), params)
-                setattr(tb, attr, r.scalar() or 0)
-            except Exception:
-                pass
 
         # Activité récente (fenêtre 5 min en mémoire)
         maintenant = time.monotonic()
