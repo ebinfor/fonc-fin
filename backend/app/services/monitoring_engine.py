@@ -898,7 +898,8 @@ async def _boucle(self) -> None:
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                _log.warning("Monitoring cycle erreur: %s", exc)
+                # Le "exc_info=True" va forcer Python à afficher le fichier et la ligne exacte du crash
+                _log.error("Monitoring cycle erreur critique détectée", exc_info=True)
 
             elapsed = time.monotonic() - t_start
             self._latences.append(elapsed * 1000)
