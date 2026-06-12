@@ -884,16 +884,14 @@ class AlerteManager:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # MOTEUR DE MONITORING PRINCIPAL
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
 async def _boucle(self) -> None:
         """Boucle principale : collecte → détection → alertes → diffusion."""
-        # On importe l'usine de session directement à l'intérieur pour éviter les imports circulaires
         from app.core.database import AsyncSessionLocal
 
         while self._running:
             t_start = time.monotonic()
             try:
-                # On ouvre une session propre et étanche pour le cycle de monitoring
+                # Session autonome et étanche, aucun risque de conflit de protocole
                 async with AsyncSessionLocal() as db:
                     await self._cycle(db)
                     
@@ -906,15 +904,53 @@ async def _boucle(self) -> None:
             self._latences.append(elapsed * 1000)
             wait = max(0, POLL_INTERVAL_SEC - elapsed)
             await asyncio.sleep(wait)
-        # Activité récente (fenêtre 5 min en mémoire)
+
+    async def tableau_bord(self, db) -> TableauBord:
+        """Construit le tableau de bord en temps réel depuis la DB."""
+        tb = TableauBord()
+
+        queries = {
+            "parcelles_actives": (
+                "SELECT COUNT(*) FROM parcelles WHERE statut='active'", {}
+            ),
+            "workflows_en_cours": (
+                "SELECT COUNT(*) FROM workflow_instances WHERE statut='en_cours'", {}
+            ),
+            "workflows_bloques": (
+                "SELECT COUNT(*) FROM workflow_instances WHERE statut='en_cours'"
+                " AND updated_at < NOW() - INTERVAL '2 hours'", {}
+            ),
+            "validations_en_attente": (
+                "SELECT COUNT(*) FROM validation_pipeline"
+                " WHERE statut NOT IN ('VALIDE','REJETE')", {}
+            ),
+            "verrous_actifs": (
+                "SELECT COUNT(*) FROM entity_lock"
+                " WHERE actif=TRUE AND (date_expiration IS NULL OR date_expiration>NOW())", {}
+            ),
+            "regles_actives": (
+                "SELECT COUNT(*) FROM regle_metier WHERE actif=TRUE AND sandbox_valide=TRUE", {}
+            ),
+        }
+
+        for attr, (sql, params) in queries.items():
+            try:
+                r = await db.execute(_text(sql), params)
+                setattr(tb, attr, r.scalar() or 0)
+            except Exception:
+                pass
+
+        # L'analyse des métriques en mémoire à court terme (5 min) se fait ICI
         maintenant = time.monotonic()
+        # Note : Vérifie que tes objets Evenement stockent bien e.ts via time.monotonic()
+        # Si c'est un datetime, il faudra adapter cette comparaison.
         fenetre = maintenant - WINDOW_SHORT_SEC
         recents = [e for e in self._events if e.ts > fenetre]
 
-        tb.ops_5min          = len(recents)
-        tb.validations_5min  = sum(1 for e in recents if e.categorie == CategorieEvenement.VALIDATION)
-        tb.echecs_5min       = sum(1 for e in recents if "REFUSE" in e.operation or "ECHEC" in e.operation)
-        tb.simulations_5min  = sum(1 for e in recents if e.categorie == CategorieEvenement.SYSTEME and "SIMULATION" in e.operation)
+        tb.ops_5min         = len(recents)
+        tb.validations_5min = sum(1 for e in recents if e.categorie == CategorieEvenement.VALIDATION)
+        tb.echecs_5min      = sum(1 for e in recents if "REFUSE" in e.operation or "ECHEC" in e.operation)
+        tb.simulations_5min = sum(1 for e in recents if e.categorie == CategorieEvenement.SYSTEME and "SIMULATION" in e.operation)
 
         # Alertes actives
         actives = self.alertes.actives()
