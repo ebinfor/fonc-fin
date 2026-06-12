@@ -969,7 +969,12 @@ class WorkflowEngine:
         Calcule de manière asynchrone la date d'échéance globale du workflow
         et l'échéance de l'étape en cours, puis met à jour l'instance et gère les escalades.
         """
-        async with db_factory() as db:
+        # On utilise directement l'usine à session autonome
+        from app.core.database import AsyncSessionLocal
+        from sqlalchemy import select, and_
+        import uuid
+
+        async with AsyncSessionLocal() as db:
             try:
                 # 1. Récupérer l'instance et sa définition
                 r = await db.execute(
