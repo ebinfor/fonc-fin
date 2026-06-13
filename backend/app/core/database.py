@@ -1,42 +1,28 @@
-import contextlib
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+import os
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
-from app.core.config import get_settings
+from app.core.config import settings
 
-settings = get_settings()
+# 1. Extraction et nettoyage de l'URL (Priorité absolue à l'environnement système de Railway)
+raw_db_url = os.getenv("DATABASE_URL", settings.DATABASE_URL)
 
-# Diagnostic (temporaire) : afficher l'hôte et le port extraits de DATABASE_URL
-# imprimé avec print() pour visibilité immédiate dans les logs Railway.
-try:
-    from urllib.parse import urlparse
-    db_url = getattr(settings, 'DATABASE_URL', None)
-    if db_url:
-        p = urlparse(db_url)
-        host = p.hostname or '<none>'
-        port = p.port or ('5432' if p.scheme and 'postgres' in p.scheme else '<none>')
-        print(f"DEBUG DB HOST: {host} PORT: {port}")
-except Exception:
-    # Ne pas faire échouer l'initialisation si le diagnostic échoue
-    pass
+if raw_db_url.startswith("postgres://"):
+    final_db_url = raw_db_url.replace("postgres://", "postgresql+asyncpg://", 1)
+elif raw_db_url.startswith("postgresql://"):
+    final_db_url = raw_db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+else:
+    final_db_url = raw_db_url
 
-# Moteur et usines natifs
-engine = create_async_engine(settings.DATABASE_URL, echo=False, future=True)
+# 2. Création de l'engine avec l'URL dynamique et robuste
+engine = create_async_engine(
+    final_db_url, 
+    echo=False, 
+    future=True,
+    pool_pre_ping=True
+)
+
+# 3. Maintien des sessions et exports requis (Workflow & Endpoints)
 AsyncSessionLocal = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
 
-# ─── EXPORTS REQUIS PAR TES ENDPOINTS (NE PAS SUPPRIMER) ───
 Base = declarative_base()
-async_session_factory = AsyncSessionLocal  # Alias pour le moteur de workflow
-
-# Dépendance standard FastAPI pour l'injection (get_db)
-async def get_db():
-    async with AsyncSessionLocal() as session:
-        yield session
-
-# Gestionnaire de contexte pour le bloc lifespan
-@contextlib.asynccontextmanager
-async def database_session_scope():
-    async with AsyncSessionLocal() as session:
-        try:
-            yield session
-        finally:
-            await session.close()
+async_session_factory = AsyncSessionLocal  # Conservé pour le moteur de workflow
