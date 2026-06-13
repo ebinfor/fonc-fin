@@ -30,3 +30,7 @@ class Settings(BaseSettings):
 
 # Instanciation globale requise par les endpoints (auth, monitoring, etc.)
 settings = Settings()
+
+# 🚀 Fonction de compatibilité requise par main.py et les dépendances FastAPI
+def get_settings() -> Settings:
+    return settings
