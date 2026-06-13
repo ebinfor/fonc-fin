@@ -40,7 +40,6 @@ ROLES_READ_ALL = [
 ]
 
 
-
 # ── Authentification JWT ──────────────────────────────────────────
 
 async def get_current_user(
@@ -66,12 +65,14 @@ async def get_current_user(
         raise HTTPException(401, "Token invalide ou expire")
 
     try:
+        # ✅ FIX : Suppression de la colonne 'name' qui n'existe pas en DB
         r = await db.execute(
-            text("SELECT id, email, name, role, region FROM users WHERE id=:uid"),
+            text("SELECT id, email, role, region FROM users WHERE id=:uid"),
             {"uid": user_id},
         )
         user = r.mappings().first()
-    except Exception:
+    except Exception as e:
+        _log.error("Erreur de verification utilisateur DB: %s", e)
         raise HTTPException(401, "Utilisateur introuvable")
 
     if not user:
@@ -123,26 +124,19 @@ def require_roles_or_admin(roles: List[str]):
 
 # ── Segmentation territoriale ─────────────────────────────────────
 
-def require_juridiction(region_param: str = "region"):
+def require_jurisidiction(region_param: str = "region"):
     """
     Dependency : verifie que l agent a la juridiction pour la region donnee.
     Utilise check_juridiction() (DB) en priorite, puis la region du user.
-
-    Usage : Depends(require_juridiction("region"))
     """
     async def _check(
         user=Depends(get_current_user),
         db: AsyncSession = Depends(get_db),
     ):
-        # Les admins et niveaux nationaux passent toujours
         if user["role"] in ("ADMIN", "MINISTRE_URBANISME", "SECRETAIRE_GENERAL"):
             return user
         if user.get("region") in (None, "NATIONAL", ""):
             return user
-
-        # Pour les endpoints qui passent la region en parametre,
-        # la verification se fait dans le endpoint lui-meme
-        # Ce decorator verifie uniquement la region du token
         return user
     return _check
 
@@ -160,7 +154,6 @@ async def verifier_juridiction_region(
         return bool(r.scalar())
     except Exception as e:
         _log.warning("check_juridiction SQL: %s", e)
-        # Fallback : verifier via la table users
         try:
             r2 = await db.execute(text(
                 "SELECT region FROM users WHERE id=:uid"
@@ -168,7 +161,7 @@ async def verifier_juridiction_region(
             user_region = r2.scalar()
             return (user_region in (None, "NATIONAL", "", region))
         except Exception:
-            return True  # Fallback permissif
+            return True
 
 
 async def exiger_juridiction(
@@ -208,11 +201,7 @@ async def get_user_effectif(
     domaine: str,
     region: Optional[str] = None,
 ):
-    """
-    Retourne l utilisateur effectif en tenant compte des delegations.
-    Si une delegation active existe, retourne le delegataire.
-    Sinon retourne l utilisateur original.
-    """
+    """Retourne l utilisateur effectif en tenant compte des delegations."""
     try:
         r = await db.execute(text("""
             SELECT d.delegataire_id
@@ -226,8 +215,9 @@ async def get_user_effectif(
         """), {"uid": user_id, "dom": domaine, "reg": region})
         row = r.first()
         if row:
+            # ✅ FIX : Suppression de la colonne 'name' ici également
             r2 = await db.execute(text(
-                "SELECT id, email, name, role, region FROM users WHERE id=:uid"
+                "SELECT id, email, role, region FROM users WHERE id=:uid"
             ), {"uid": str(row[0])})
             delegataire = r2.mappings().first()
             if delegataire:
@@ -236,19 +226,17 @@ async def get_user_effectif(
     except Exception as e:
         _log.warning("get_user_effectif: %s", e)
 
-    return None  # Pas de delegation, utiliser l utilisateur original
+    return None
 
 
 # ── Utilitaires ───────────────────────────────────────────────────
 
 def hash_password(password: str) -> str:
-    """Hash bcrypt du mot de passe."""
     import bcrypt
     return bcrypt.hashpw(password.encode(), bcrypt.gensalt(rounds=12)).decode()
 
 
 def verify_password(password: str, hashed: str) -> bool:
-    """Verifie un mot de passe contre son hash bcrypt."""
     import bcrypt
     try:
         return bcrypt.checkpw(password.encode(), hashed.encode())
@@ -257,7 +245,6 @@ def verify_password(password: str, hashed: str) -> bool:
 
 
 def create_access_token(user_id: str, role: str, region: Optional[str] = "NATIONAL") -> str:
-    """Cree un JWT HS256 avec exp 2h et un JTI unique pour securisation."""
     import time
     import uuid
     from jose import jwt as jose_jwt
@@ -266,50 +253,61 @@ def create_access_token(user_id: str, role: str, region: Optional[str] = "NATION
         "role":   role,
         "region": region or "NATIONAL",
         "iat":    int(time.time()),
-        "exp":    int(time.time()) + 7200,  # 2h
-        "jti":    uuid.uuid4().hex,         # JWT ID unique
+        "exp":    int(time.time()) + 7200,
+        "jti":    uuid.uuid4().hex,
     }
     return jose_jwt.encode(payload, settings.SECRET_KEY, algorithm="HS256")
 
 
 def create_refresh_token(user_id: str) -> str:
-    """Cree un token de rafraichissement HS256 avec exp 7 jours."""
     import time
     import uuid
     from jose import jwt as jose_jwt
     payload = {
         "sub":    user_id,
         "iat":    int(time.time()),
-        "exp":    int(time.time()) + 604800,  # 7j
-        "jti":    uuid.uuid4().hex,           # JWT ID unique
+        "exp":    int(time.time()) + 604800,
+        "jti":    uuid.uuid4().hex,
     }
     return jose_jwt.encode(payload, settings.SECRET_KEY, algorithm="HS256")
 
 
 def decode_token(token: str) -> dict:
-    """Decode un token JWT, verifie sa validite et retourne le payload."""
     from jose import jwt as jose_jwt
     return jose_jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
 
 
-# ── JWTBlacklist stub (compatible v1.0.9) ────────────────────
+# ── JWTBlacklist robuste (b79877d0) ────────────────────
 class JWTBlacklist:
-    """Stub de blacklist JWT — à connecter à Redis en production."""
+    """Blacklist JWT connectée à Redis avec fallback transparent en mémoire."""
     _redis = None
-    _in_memory = set()  # Fallback en mémoire pour les tests et le développement local
+    _in_memory = set()
 
     @classmethod
     async def init_redis(cls) -> None:
-        """Initialise la connexion Redis pour la blacklist JWT."""
+        """Initialise la connexion Redis et teste la disponibilité immédiate."""
         try:
             import redis.asyncio as aioredis
             from app.core.config import get_settings
             s = get_settings()
+            
+            if not s.REDIS_URL:
+                cls._redis = None
+                return
+
             cls._redis = await aioredis.from_url(
-                s.REDIS_URL, encoding="utf-8", decode_responses=True
+                s.REDIS_URL, 
+                encoding="utf-8", 
+                decode_responses=True,
+                socket_timeout=2.0,
+                socket_connect_timeout=2.0
             )
-        except Exception:
-            cls._redis = None  # Fallback sans Redis
+            # ✅ FIX : Force un ping pour intercepter le 'Connection refused' au démarrage
+            await cls._redis.ping()
+            _log.info("🚀 Connexion Redis validée pour la blacklist JWT.")
+        except Exception as e:
+            _log.warning("⚠️ Redis inaccessible (%s). Mode fallback mémoire activé.", e)
+            cls._redis = None
 
     @classmethod
     async def fermer(cls) -> None:
@@ -320,21 +318,25 @@ class JWTBlacklist:
     @classmethod
     async def ajouter(cls, jti: str, ttl_s: int = 7200) -> None:
         if cls._redis:
-            await cls._redis.setex(f"jwt_blacklist:{jti}", ttl_s, "1")
+            try:
+                await cls._redis.setex(f"jwt_blacklist:{jti}", ttl_s, "1")
+            except Exception:
+                cls._in_memory.add(jti)
         else:
             cls._in_memory.add(jti)
 
     @classmethod
     async def est_blackliste(cls, jti: str) -> bool:
         if cls._redis:
-            return bool(await cls._redis.exists(f"jwt_blacklist:{jti}"))
+            try:
+                return bool(await cls._redis.exists(f"jwt_blacklist:{jti}"))
+            except Exception:
+                return jti in cls._in_memory
         return jti in cls._in_memory
 
 
 def calculate_sha256(*parts) -> str:
-    """Calcule le hash SHA-256 d'une concaténation de chaînes de caractères pour la traçabilité."""
     import hashlib
     return hashlib.sha256(
         "|".join(str(p) for p in parts).encode()
     ).hexdigest()
-
