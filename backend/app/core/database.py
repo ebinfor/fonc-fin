@@ -3,15 +3,24 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 from sqlalchemy.orm import declarative_base
 from app.core.config import settings
 
-# 🚀 On utilise directement la version blindée et convertie par settings
+# 🚀 Sécurité absolue : On extrait et on convertit l'URL à la milliseconde près du branchement
+db_url = str(settings.DATABASE_URL)
+
+if db_url.startswith("postgres://"):
+    final_db_url = db_url.replace("postgres://", "postgresql+asyncpg://", 1)
+elif db_url.startswith("postgresql://"):
+    final_db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+else:
+    final_db_url = db_url
+
+# Création de l'engine asynchrone avec l'URL garantie rétablie
 engine = create_async_engine(
-    settings.DATABASE_URL, 
+    final_db_url, 
     echo=False, 
     future=True,
     pool_pre_ping=True
 )
 
-# Maintien des sessions pour le reste de l'application
 AsyncSessionLocal = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
 
 Base = declarative_base()
