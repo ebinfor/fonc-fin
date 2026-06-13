@@ -90,7 +90,7 @@ async def login(p: LoginIn, request: Request, db: AsyncSession = Depends(get_db)
         # 🚀 FORCE L'AFFICHAGE DU TRACEBACK COMPLET DANS LES LOGS RAILWAY
         traceback.print_exc() 
         
-        _l.getLogger('auth').warning('login: %s', e)
+        import os; _l.getLogger('auth').warning('🚨 TARGET ENV DATABASE_URL: %s', os.getenv('DATABASE_URL')); _l.getLogger('auth').warning('login: %s', e)
         raise HTTPException(status_code=500, detail=str(e)[:200])
 
         # Vérification TOTP (mock sécurisé ou pyotp)
