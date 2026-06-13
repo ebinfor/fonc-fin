@@ -14,6 +14,7 @@ Corrections intégrées :
 import logging
 import time
 import uuid
+import contextvars
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -24,68 +25,55 @@ from app.core.config import get_settings
 settings = get_settings()
 logger   = logging.getLogger("foncier")
 
-
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Lifespan : démarrage / arrêt ordonnés
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    logger.info("===> [LIFESPAN] Démarrage du cycle de vie...")
+    
     # 1. Blacklist JWT Redis
-    from app.core.security import JWTBlacklist
-    await JWTBlacklist.init_redis()
+    try:
+        from app.core.security import JWTBlacklist
+        await JWTBlacklist.init_redis()
+        logger.info("===> [LIFESPAN] Redis initialisé")
+    except Exception as e:
+        logger.error(f"===> [LIFESPAN] Échec Redis: {e}")
 
     # 2. Moteur de monitoring temps réel
-    from app.services.monitoring_engine import MonitoringEngine
-    # use the async context manager factory so MonitoringEngine can `async with`
-    from app.core.database import database_session_scope
     try:
-        await MonitoringEngine.instance().demarrer(database_session_scope)
-        logger.info("MonitoringEngine démarré")
+        from app.services.monitoring_engine import MonitoringEngine
+        from app.core.database import database_session_scope
+        
+        # On s'assure d'exécuter l'instance proprement
+        engine = MonitoringEngine.instance()
+        await engine.demarrer(database_session_scope)
+        logger.info("===> [LIFESPAN] MonitoringEngine démarré")
     except Exception as exc:
-        logger.warning("MonitoringEngine démarrage: %s", exc)
+        logger.error(f"===> [LIFESPAN] Échec MonitoringEngine: {exc}")
 
-    if settings.SENTRY_DSN:
-        import sentry_sdk
-        sentry_sdk.init(
-            dsn=settings.SENTRY_DSN,
-            traces_sample_rate=0.1,
-            before_send=lambda e, h: None
-                if e.get("level") in ("warning",)
-                   and e.get("exception", {}).get("values", [{}])[0]
-                      .get("type") in ("AuthenticationError",)
-                else e,
-        )
-
-    logger.info(
-        "FONCIER+ v1.0.9 démarré — JWT:%s Redis blacklist:%s",
-        settings.jwt_algorithm_actif,
-        settings.redis_blacklist_actif,
-    )
+    logger.info("===> [LIFESPAN] Application prête à recevoir des requêtes !")
     yield
-
-    await MonitoringEngine.instance().arreter()
-    from app.core.security import JWTBlacklist
-    await JWTBlacklist.fermer()
-    logger.info("FONCIER+ v1.0.9 arrêté proprement")
+    
+    logger.info("===> [LIFESPAN] Arrêt de l'application...")
+    try:
+        await MonitoringEngine.instance().arreter()
+    except Exception:
+        pass
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Application FastAPI
+# Application FastAPI (CRUCIAL : Déclarée AVANT d'y attacher les middlewares)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
 app = FastAPI(
     title       = "FONCIER+ — API Nationale v1.0.9",
     description = "Plateforme nationale de gestion foncière — République du Niger",
     version     = "1.0.9",
-    docs_url    = "/docs"  if not settings.is_production else None,
-    redoc_url   = "/redoc" if not settings.is_production else None,
-    lifespan    = lifespan,
+    lifespan    = lifespan
 )
 
 
 # ── Middleware X-Request-ID ───────────────────────────────────
-import contextvars
 _request_id_var: contextvars.ContextVar[str] = contextvars.ContextVar(
     "request_id", default="-"
 )
@@ -104,7 +92,6 @@ def get_request_id() -> str:
     return _request_id_var.get()
 
 
-# ── Rate limiting global ──────────────────────────────────────
 # ── Rate limiting global ──────────────────────────────────────
 class GlobalRateLimiter:
     """Rate limiter par IP basé sur Redis (Sorted Sets) et asynchrone."""
@@ -134,7 +121,6 @@ class GlobalRateLimiter:
             pipe = r.pipeline()
             pipe.zremrangebyscore(key, "-inf", clear_before)
             pipe.zcard(key)
-            # Utiliser la valeur du timestamp + un microsecond float aléatoire pour éviter les doublons de score exacts
             pipe.zadd(key, {f"{now}_{time.monotonic()}": now})
             pipe.expire(key, cls.WINDOW_SEC + 10) # 10s de marge
             
@@ -142,7 +128,6 @@ class GlobalRateLimiter:
             count = results[1]
             
             if count >= limit:
-                # Si la limite est dépassée, on nettoie pour ne pas gonfler artificiellement le ZSET
                 await r.zremrangebyscore(key, now, "+inf")
                 return False, 0
                 
@@ -231,7 +216,6 @@ async def global_exception_handler(request: Request, exc: Exception):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Health checks
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
 @app.get("/health", tags=["Système"])
 async def health_check():
     """Liveness + Readiness probe — vérifie DB, Redis, MonitoringEngine."""
@@ -269,7 +253,6 @@ async def liveness(): return {"alive": True}
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Routers intelligents (monitoring/risk/dashboard) — préfixe /api/v1
-# Chargés en dur car leurs préfixes sont distincts des modules /v1
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 from app.api.v1.endpoints.monitoring       import router as monitoring_router
 from app.api.v1.endpoints.risk             import router as risk_router
@@ -282,47 +265,38 @@ app.include_router(monitoring_router, prefix="/api/v1")
 from app.api.v1.endpoints.dar import router as _dar_router_template
 from fastapi import APIRouter as _APIRouter
 
-# ── Montage des DAR par module ──────────────────────────────
-# Chaque module a son propre DAR avec ses archives spécifiques
 _dar_modules = {
-    "urbanisme": "/urbanisme/dar",  # Arrêtés fonciers, RNAF papier, plans directeurs, c
-    "cadastre": "/cadastre/dar",  # Plans cadastraux papier, NICAD historiques, BD Top
-    "ccfm": "/ccfm/dar",  # Certificats CCFM antérieurs à v1.0, dossiers de de
-    "domaine": "/domaine/dar",  # Expropriations historiques, concessions domaniales
-    "notaire": "/notaire/dar",  # Actes notariés papier, mutations anciennes, succes
-    "banque": "/banque/dar",  # Hypothèques papier, actes de mainlevée anciens, re
-    "justice": "/justice/dar",  # Jugements fonciers papier, greffes judiciaires, dé
-    "commune": "/commune/dar",  # Dépôts fonciers communaux anciens, registres commu
-    "annf": "/annf/dar",  # Supervision des DAR nationaux, scellement central 
-    "bgu": "/bgu/dar",  # Plans graphiques papier, cartes topographiques, or
-    "journal_officiel": "/jo/dar",  # Parutions JO papier, journaux anciens, textes fonc
+    "urbanisme": "/urbanisme/dar",
+    "cadastre": "/cadastre/dar",
+    "ccfm": "/ccfm/dar",
+    "domaine": "/domaine/dar",
+    "notaire": "/notaire/dar",
+    "banque": "/banque/dar",
+    "justice": "/justice/dar",
+    "commune": "/commune/dar",
+    "annf": "/annf/dar",
+    "bgu": "/bgu/dar",
+    "journal_officiel": "/jo/dar",
 }
 for _dar_prefix in _dar_modules.values():
-    # Créer une copie du routeur pour chaque module
     _dar_copy = _APIRouter(prefix=_dar_prefix, tags=[f'DAR — {_dar_prefix}'])
     for _route in _dar_router_template.routes:
         _dar_copy.routes.append(_route)
     app.include_router(_dar_copy, prefix='/v1')
 
-app.include_router(risk_router,       prefix="/api/v1")
+app.include_router(risk_router,   prefix="/api/v1")
 app.include_router(dashboard_router,  prefix="/api/v1")
-# ccfm_v3 déclare son propre préfixe /api/v3/ccfm
 app.include_router(ccfm_v3_router)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Routers dynamiques via ServiceRegistry
-# En mode monolithique : tous les modules sont chargés.
-# En mode microservice : seuls les modules définis par
-#   FONCIER_MODULES sont activés (ex: "ccfm,ccfm_v3,auth,users")
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 from app.core.service_registry import ServiceRegistry
 
-# Modules à exclure car déjà déclarés ci-dessus avec préfixe personnalisé
 _ALREADY_LOADED = {"monitoring", "risk", "dashboard", "ccfm_v3"}
 
 for _router, _prefix in ServiceRegistry.get_routers():
-    # Ignorer les modules déjà chargés
     _name = getattr(_router, "prefix", "")
     if any(skip in str(_name) for skip in ["/monitoring", "/risk", "/dashboard", "/api/v3/ccfm"]):
         continue
