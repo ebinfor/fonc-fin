@@ -14,6 +14,7 @@ else:
     final_db_url = raw_db_url
 
 # 2. Création de l'engine avec l'URL dynamique et robuste
+print(f"\n🚨🚨🚨 [DIAGNOSTIC] FONCIER+ TENTE DE SE CONNECTER À : {final_db_url.split('@')[-1] if '@' in final_db_url else final_db_url}\n", flush=True)
 engine = create_async_engine(
     final_db_url, 
     echo=False, 
