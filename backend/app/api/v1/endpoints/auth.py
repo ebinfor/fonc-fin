@@ -84,23 +84,13 @@ async def login(p: LoginIn, request: Request, db: AsyncSession = Depends(get_db)
         raise
     except Exception as e:
         import logging as _l
-        _l.getLogger('auth').warning('login: %s', e)
-        raise HTTPException(status_code=500,
-            detail=str(e)[:200])
-
-@router.post("/mfa", response_model=TokenOut)
-async def verify_mfa(p: MFAVerifyIn, db: AsyncSession = Depends(get_db)):
-    """Vérifie le code TOTP MFA pour finaliser la connexion."""
-    try:
-        payload = decode_token(p.mfa_token)
-        if payload.get("type") != "mfa_pending":
-            raise HTTPException(400, "Jeton MFA invalide ou expiré")
+        import traceback
         
-        uid = payload.get("sub")
-        r = await db.execute(select(User).where(User.id == uid, User.actif == True))
-        u = r.scalar_one_or_none()
-        if not u:
-            raise HTTPException(404, "Utilisateur introuvable")
+        # 🚀 FORCE L'AFFICHAGE DU TRACEBACK COMPLET DANS LES LOGS RAILWAY
+        traceback.print_exc() 
+        
+        _l.getLogger('auth').warning('login: %s', e)
+        raise HTTPException(status_code=500, detail=str(e)[:200])
 
         # Vérification TOTP (mock sécurisé ou pyotp)
         # En production, on utiliserait pyotp.TOTP(u.totp_secret).verify(p.code)
