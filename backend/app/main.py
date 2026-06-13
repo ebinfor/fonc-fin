@@ -308,5 +308,5 @@ for _router, _prefix in ServiceRegistry.get_routers():
 logger.info(
     "FONCIER+ v1.0.9 — service=%s modules=%s",
     ServiceRegistry.service_name(),
-    ServiceRegistry.active_modules(),
+    ServiceRegistry.active_modules()
 )
