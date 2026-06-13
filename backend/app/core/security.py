@@ -244,39 +244,30 @@ def verify_password(password: str, hashed: str) -> bool:
         return False
 
 
-def create_access_token(user_id: str, role: str, region: Optional[str] = "NATIONAL") -> str:
+def create_access_token(user_id: str, role: str, region: Optional[str] = "NATIONAL", expires_delta = None) -> str:
     import time
     import uuid
+    from datetime import timedelta
     from jose import jwt as jose_jwt
+    
+    # Calcul dynamique du temps d'expiration (exp)
+    if expires_delta:
+        if isinstance(expires_delta, timedelta):
+            expire_time = int(time.time() + expires_delta.total_seconds())
+        else:
+            expire_time = int(time.time() + int(expires_delta))
+    else:
+        expire_time = int(time.time()) + 7200  # 2 heures par défaut
+
     payload = {
         "sub":    user_id,
         "role":   role,
         "region": region or "NATIONAL",
         "iat":    int(time.time()),
-        "exp":    int(time.time()) + 7200,
+        "exp":    expire_time,
         "jti":    uuid.uuid4().hex,
     }
     return jose_jwt.encode(payload, settings.SECRET_KEY, algorithm="HS256")
-
-
-def create_refresh_token(user_id: str) -> str:
-    import time
-    import uuid
-    from jose import jwt as jose_jwt
-    payload = {
-        "sub":    user_id,
-        "iat":    int(time.time()),
-        "exp":    int(time.time()) + 604800,
-        "jti":    uuid.uuid4().hex,
-    }
-    return jose_jwt.encode(payload, settings.SECRET_KEY, algorithm="HS256")
-
-
-def decode_token(token: str) -> dict:
-    from jose import jwt as jose_jwt
-    return jose_jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
-
-
 # ── JWTBlacklist robuste (b79877d0) ────────────────────
 class JWTBlacklist:
     """Blacklist JWT connectée à Redis avec fallback transparent en mémoire."""
