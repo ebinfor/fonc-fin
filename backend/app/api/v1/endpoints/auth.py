@@ -83,6 +83,7 @@ async def login(p: LoginIn, request: Request, db: AsyncSession = Depends(get_db)
     except HTTPException:
         raise
     except Exception as e:
+        import traceback; traceback.print_exc()
         import logging as _l
         import traceback
         
@@ -121,6 +122,7 @@ async def login(p: LoginIn, request: Request, db: AsyncSession = Depends(get_db)
     except HTTPException:
         raise
     except Exception as e:
+        import traceback; traceback.print_exc()
         raise HTTPException(400, f"Erreur de vérification MFA : {str(e)[:200]}")
 
 @router.get("/me", response_model=dict)
