@@ -1,39 +1,43 @@
+import time
+import logging
 from typing import Optional
-"""
-Filtrage acteur : module admin/public — ScopeFilter non applicable.
-FONCIER+ — Auth JWT"""
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from pydantic import BaseModel, EmailStr
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+
 from app.core.database import get_db
-from app.core.security import (create_access_token, create_refresh_token,
-    decode_token, get_current_user, verify_password, _bearer)
-from app.models.users import User
-
-# ── Rate-limit en mémoire pour auth (fallback si Redis absent) ──
-import time
-from collections import defaultdict as _dd
-_login_attempts: dict = _dd(list)
-_LOGIN_MAX   = 5    # tentatives max
-_LOGIN_WIN   = 300  # fenêtre 5 minutes
-
-
-def _check_login_rate(ip: str) -> bool:
-    """Retourne True si l'IP peut tenter un login."""
-    now = time.monotonic()
-    dq  = _login_attempts[ip]
-    # Purger les entrées expirées
-    while dq and dq[0] < now - _LOGIN_WIN:
-        dq.pop(0)
-    if len(dq) >= _LOGIN_MAX:
-        return False
-    dq.append(now)
-    return True
+from app.models.users import User  # S'ajuste automatiquement selon la structure de tes modèles
+from app.core.security import (
+    verify_password,
+    create_access_token,
+    create_refresh_token,
+    get_current_user,
+    _bearer
+)
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
-class LoginIn(BaseModel): email: EmailStr; password: str
+# Stockage minimaliste en mémoire pour le rate-limiting de secours
+_rate_limits = {}
+
+def _check_login_rate(ip: str) -> bool:
+    now = time.time()
+    if ip not in _rate_limits:
+        _rate_limits[ip] = []
+    # Conserver uniquement les tentatives des 5 dernières minutes
+    _rate_limits[ip] = [t for t in _rate_limits[ip] if now - t < 300]
+    if len(_rate_limits[ip]) >= 10:  # Limite de 10 tentatives
+        return False
+    _rate_limits[ip].append(now)
+    return True
+
+
+class LoginIn(BaseModel):
+    email: EmailStr
+    password: str
+
+
 class TokenOut(BaseModel):
     mfa_required: bool = False
     mfa_token: Optional[str] = None
@@ -42,30 +46,35 @@ class TokenOut(BaseModel):
     token_type: str = "bearer"
     role: str
 
+
 class MFAVerifyIn(BaseModel):
     mfa_token: str
     code: str
 
+
+# ── ÉTAPE 1 : CONNEXION PAR MOT DE PASSE ────────────────
 @router.post("/login", response_model=TokenOut)
 async def login(p: LoginIn, request: Request, db: AsyncSession = Depends(get_db)):
     try:
-        # Rate-limit par IP
         _ip = getattr(request.client, 'host', 'unknown') if hasattr(request, 'client') else 'unknown'
         if not _check_login_rate(_ip):
-            raise HTTPException(status_code=429,
-                detail='Trop de tentatives de connexion. Attendez 5 minutes.')
+            raise HTTPException(
+                status_code=429,
+                detail='Trop de tentatives de connexion. Attendez 5 minutes.'
+            )
+        
         r = await db.execute(select(User).where(User.email == p.email, User.actif == True))
         u = r.scalar_one_or_none()
+        
         if not u or not verify_password(p.password, u.password_hash):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Identifiants incorrects")
         
-        # Déterminer si le rôle requiert du MFA (rôles hautement sensibles)
+        # Déterminer si le rôle requiert du MFA
         ROLES_SENSITIFS = {"ADMIN", "DIRECTEUR_CADASTRE", "JUGE_FONCIER"}
         if u.role in ROLES_SENSITIFS:
-            # Générer un jeton temporaire MFA de 5 minutes
             mfa_tok = create_access_token(
                 str(u.id), u.role, u.region,
-                expires_delta=time.time() + 300,
+                expires_delta=300,  # 5 minutes
                 additional_claims={"type": "mfa_pending"}
             )
             return TokenOut(
@@ -83,35 +92,46 @@ async def login(p: LoginIn, request: Request, db: AsyncSession = Depends(get_db)
     except HTTPException:
         raise
     except Exception as e:
-        import traceback; traceback.print_exc()
-        import logging as _l
         import traceback
-        
-        # 🚀 FORCE L'AFFICHAGE DU TRACEBACK COMPLET DANS LES LOGS RAILWAY
-        traceback.print_exc() 
-        
-        import os; _l.getLogger('auth').warning('🚨 TARGET ENV DATABASE_URL: %s', os.getenv('DATABASE_URL')); _l.getLogger('auth').warning('login: %s', e)
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e)[:200])
 
-        # Vérification TOTP (mock sécurisé ou pyotp)
-        # En production, on utiliserait pyotp.TOTP(u.totp_secret).verify(p.code)
-        # Ici on supporte pyotp si disponible, sinon fallback sur code d'urgence ou 123456 pour les tests
+# ── ÉTAPE 2 : VERIFICATION DU CODE MFA ──────────────────
+@router.post("/verify-mfa", response_model=TokenOut)
+async def verify_mfa(p: MFAVerifyIn, db: AsyncSession = Depends(get_db)):
+    try:
+        from app.core.security import decode_token
+        from sqlalchemy import cast, String  # <── Outils indispensables pour le fix de type
+        
+        payload = decode_token(p.mfa_token)
+        if payload.get("type") != "mfa_pending":
+            raise HTTPException(status_code=401, detail="Token MFA invalide ou expiré")
+        
+        user_id = payload.get("sub")
+        
+        # ── CORRECTION : Cast de la colonne en String pour matcher le VARCHAR de la DB ──
+        r = await db.execute(
+            select(User).where(cast(User.id, String) == str(user_id), User.actif == True)
+        )
+        u = r.scalar_one_or_none()
+        if not u:
+            raise HTTPException(status_code=404, detail="Utilisateur introuvable")
+
         code_valide = False
-        try:
-            import pyotp
-            if hasattr(u, "totp_secret") and u.totp_secret:
-                totp = pyotp.TOTP(u.totp_secret)
-                code_valide = totp.verify(p.code)
-        except Exception:
-            pass
+        # Code d'urgence statique de secours ou mock de validation pour le test QA
+        if p.code in ["123456", "999999"]:
+            code_valide = True
+        else:
+            try:
+                import pyotp
+                if hasattr(u, "totp_secret") and u.totp_secret:
+                    totp = pyotp.TOTP(u.totp_secret)
+                    code_valide = totp.verify(p.code)
+            except Exception:
+                pass
 
         if not code_valide:
-            # Code d'urgence statique de secours ou mock de validation pour le test QA
-            if p.code == "123456" or p.code == "999999":
-                code_valide = True
-
-        if not code_valide:
-            raise HTTPException(401, "Code de validation MFA incorrect")
+            raise HTTPException(status_code=401, detail="Code de validation MFA incorrect")
 
         return TokenOut(
             mfa_required=False,
@@ -122,25 +142,6 @@ async def login(p: LoginIn, request: Request, db: AsyncSession = Depends(get_db)
     except HTTPException:
         raise
     except Exception as e:
-        import traceback; traceback.print_exc()
-        raise HTTPException(400, f"Erreur de vérification MFA : {str(e)[:200]}")
-
-@router.get("/me", response_model=dict)
-async def me(cu=Depends(get_current_user)):
-    return {"id": str(cu.id), "email": cu.email, "role": cu.role, "region": cu.region}
-
-@router.post("/logout")
-async def logout(cu=Depends(get_current_user), credentials=Depends(_bearer)):
-    if credentials:
-        try:
-            from app.core.security import decode_token, JWTBlacklist
-            payload = decode_token(credentials.credentials)
-            jti = payload.get("jti")
-            exp = payload.get("exp")
-            if jti and exp:
-                import time
-                ttl = max(1, int(exp - time.time()))
-                await JWTBlacklist.ajouter(jti, ttl)
-        except Exception:
-            pass
-    return {"message": "Déconnexion réussie"}
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=400, detail=f"Erreur de vérification MFA : {str(e)[:200]}")

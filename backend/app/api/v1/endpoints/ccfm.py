@@ -362,7 +362,7 @@ async def archiver_dar(
     return {"ida": archive.ida if hasattr(archive, "ida") else None, "module": "ccfm"}
 
 
-@router.get("/dar/integrite", response_model=list)
+@router.get("/dar/integrite", response_model=dict)
 async def integrite_dar(
     db: AsyncSession = Depends(get_db),
     current_user=Depends(require_role(_LECTURE + ["AUDITEUR"])),

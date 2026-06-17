@@ -1,3 +1,4 @@
+from alembic import context
 """
 FONCIER+ v3.4.8 — Tests méta sur la complétude des workflows
 =============================================================

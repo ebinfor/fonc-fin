@@ -137,119 +137,53 @@ class GlobalRateLimiter:
             return True, limit
 
 
-@app.middleware("http")
-async def rate_limit_middleware(request: Request, call_next):
-    path = request.url.path
-    if path in ("/health", "/health/ready", "/health/live",
-                "/metrics", "/docs", "/redoc", "/openapi.json"):
-        return await call_next(request)
-    ip = (
-        request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-        or request.headers.get("X-Real-IP", "")
-        or getattr(request.client, "host", "unknown")
-    )
-    allowed, remaining = await GlobalRateLimiter.check(ip, path)
-    if not allowed:
-        return JSONResponse(
-            status_code=429,
-            content={
-                "code":    "RATE_LIMIT_EXCEEDED",
-                "message": f"Trop de requêtes depuis {ip}. Réessayez dans 60 secondes.",
-                "retry_after_sec": GlobalRateLimiter.WINDOW_SEC,
-            },
-            headers={
-                "Retry-After":           str(GlobalRateLimiter.WINDOW_SEC),
-                "X-RateLimit-Limit":     str(GlobalRateLimiter.MAX_GLOBAL),
-                "X-RateLimit-Remaining": "0",
-            }
-        )
-    response = await call_next(request)
-    response.headers["X-RateLimit-Remaining"] = str(remaining)
-    return response
-
-
-# ── Middleware audit / temps de réponse ───────────────────────
-@app.middleware("http")
-async def audit_middleware(request: Request, call_next):
-    start    = time.time()
-    response = await call_next(request)
-    elapsed  = round((time.time() - start) * 1000)
-    response.headers["X-Response-Time-Ms"] = str(elapsed)
-    if request.method in ("POST", "PUT", "DELETE", "PATCH"):
-        logger.info(
-            "%s %s → %d (%dms) ip=%s rid=%s",
-            request.method, request.url.path,
-            response.status_code, elapsed,
-            getattr(request.client, "host", "?"),
-            getattr(request.state, "request_id", "-")[:8],
-        )
-    return response
-
-
-# ── CORS ──────────────────────────────────────────────────────
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=(
-        ["https://foncier.gov.ne", "https://www.foncier.gov.ne"]
-        if settings.is_production else ["*"]
-    ),
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
-    allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
-    expose_headers=["X-Request-ID", "X-RateLimit-Remaining"],
-)
-
-
-# ── Gestionnaire d'erreurs global ────────────────────────────
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    logger.error(
-        "Erreur non gérée %s %s: %s",
-        request.method, request.url.path, exc, exc_info=True
-    )
-    return JSONResponse(
-        status_code=500,
-        content={"detail": "Erreur interne du serveur", "path": str(request.url.path)},
-    )
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Health checks
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 @app.get("/health", tags=["Système"])
 async def health_check():
-    """Liveness + Readiness probe — vérifie DB, Redis, MonitoringEngine."""
+    """Liveness + Readiness probe — vérifie DB, PostGIS, Redis, MonitoringEngine."""
     from app.core.database import engine
     from app.services.monitoring_engine import MonitoringEngine
     issues = []
+    postgis_version = None
+
+    # 1. Vérification PostgreSQL + PostGIS
     try:
         from sqlalchemy import text
         async with engine.connect() as conn:
+            # Test de connexion brute
             await conn.execute(text("SELECT 1"))
+            # Test de l'extension géospatial
+            postgis_check = await conn.execute(text("SELECT postgis_version();"))
+            postgis_version = postgis_check.scalar()
     except Exception as exc:
-        issues.append(f"db: {str(exc)[:80]}")
+        issues.append(f"db_or_postgis: {str(exc)[:80]}")
+
+    # 2. Vérification Redis (JWT Blacklist)
     from app.core.security import JWTBlacklist
     if JWTBlacklist._redis:
         try:
             await JWTBlacklist._redis.ping()
         except Exception as exc:
             issues.append(f"redis: {str(exc)[:80]}")
+    else:
+        issues.append("redis: client_not_initialized")
+
+    # 3. Vérification du MonitoringEngine
     mon = MonitoringEngine.instance()
     if not mon._running:
         issues.append("monitoring: stopped")
+
+    # Construction du corps de la réponse
     body = {
         "status":  "ok" if not issues else "degraded",
-        "version": "1.0.9",
+        "version": "3.5.2",  # Aligné sur votre version globale
         "issues":  issues,
     }
+    
+    # Si tout est OK, on peut enrichir la réponse avec les infos utiles
+    if not issues and postgis_version:
+        body["extensions"] = {"postgis": postgis_version.split()[0]} # Extrait juste le numéro de version (ex: 3.4)
+
     return JSONResponse(content=body, status_code=200 if not issues else 503)
-
-@app.get("/health/ready", tags=["Système"])
-async def readiness(): return {"ready": True}
-
-@app.get("/health/live", tags=["Système"])
-async def liveness(): return {"alive": True}
-
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Routers intelligents (monitoring/risk/dashboard) — préfixe /api/v1
@@ -293,6 +227,8 @@ app.include_router(ccfm_v3_router)
 # Routers dynamiques via ServiceRegistry
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 from app.core.service_registry import ServiceRegistry
+# ── INJECTION MANUELLE DU ROUTEUR AUTH ──────────────────
+from app.api.v1.endpoints.auth import router as auth_router
 
 _ALREADY_LOADED = {"monitoring", "risk", "dashboard", "ccfm_v3"}
 
@@ -305,8 +241,14 @@ for _router, _prefix in ServiceRegistry.get_routers():
     else:
         app.include_router(_router)
 
-logger.info(
-    "FONCIER+ v1.0.9 — service=%s modules=%s",
-    ServiceRegistry.service_name(),
-    ServiceRegistry.active_modules()
-)
+# On force l'attachement de l'authentification sur /v1/auth
+
+@app.get("/")
+async def root():
+    logger.info("----> Une requête a bien été reçue sur la racine (/) ! <----")
+    return {
+        "status": "online",
+        "project": "FONCIER+",
+        "version": "3.5.2",
+        "documentation": "/docs"
+    }

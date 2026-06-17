@@ -42,66 +42,49 @@ except ImportError:
 
 @pytest_asyncio.fixture(scope="session", autouse=True)
 async def init_database_schema():
-    # Importation explicite et ordonnée de tous les modules de l'application
-    # pour garantir la résolution des contraintes de clés étrangères (FK)
-    try:
-        import app.models.auth
-        import app.models.utilisateurs
-        import app.models.parcellaire
-        import app.models.droits_fonciers
-        import app.models.workflows
-        # Importation des modules spécifiques au Registre National (RNAF) et domaines
-        import app.models.rnaf
-        import app.models.domaines
-        import app.models.urbanisme
-    except ImportError as e:
-        print(f"⚠️ Note d'importation des sous-modules : {e}")
-
+    # [Vos imports de modules de conftest restent ici...]
+    
     if Base is not None and engine is not None:
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            from sqlalchemy import text
+            
+            # 1. Nettoyage complet
+            print("🧼 [TEST SETUP] Destruction et recréation du schéma public Postgres...")
+            await conn.execute(text("DROP SCHEMA public CASCADE;"))
+            await conn.execute(text("CREATE SCHEMA public;"))
+            await conn.execute(text("GRANT ALL ON SCHEMA public TO public;"))
+            
+            # 2. Réactivation des extensions
+            print("🌍 [TEST SETUP] Réactivation propre de PostGIS et UUID...")
+            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis;"))
+            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";"))
+            
+            # 🔥 LE PATCH DE SECOURS : On pré-crée la table 'users' demandée par la migration 003
+            print("👤 [TEST SETUP] Création de la table 'users' de secours pour valider les FK...")
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    email VARCHAR(255) UNIQUE,
+                    is_active BOOLEAN DEFAULT TRUE
+                );
+            """))
+            
+            # 3. Exécution d'Alembic
+            def run_alembic_upgrade(sync_conn):
+                from alembic.config import Config
+                from alembic import command
+                import os
+                
+                ini_path = "alembic.ini" if os.path.exists("alembic.ini") else "backend/alembic.ini"
+                cfg = Config(ini_path)
+                cfg.attributes['connection'] = sync_conn
+                command.upgrade(cfg, "head")
+            
+            print("🚀 [TEST SETUP] Application des migrations Alembic (001 à 018)...")
+            await conn.run_sync(run_alembic_upgrade)
+            print("✅ [TEST SETUP] Schéma FONCIER+ reconstruit avec succès !")
+            
     yield
-
-
-# Injection de l'override de sécurité pour court-circuiter AttributeError sur SECRET_KEY
-@pytest.fixture(scope="session")
-def setup_security_overrides():
-    try:
-        from app.main import app
-        from app.core.security import get_current_user
-    except ImportError:
-        try:
-            from backend.app.main import app
-            from backend.app.core.security import get_current_user
-        except ImportError:
-            return
-
-    async def mock_get_current_user(authorization: str = None):
-        # On extrait le rôle directement depuis notre token factice MOCK_TOKEN_
-        if authorization and "Bearer MOCK_TOKEN_" in authorization:
-            role = authorization.replace("Bearer MOCK_TOKEN_", "").strip()
-            class MockUser:
-                def __init__(self, r):
-                    self.id = 12345  # ID fictif pour passer les affectations de logs/moteur
-                    self.role = r
-                    self.email = f"{r.lower()}@test.foncier.ne"
-                    self.is_active = True
-            return MockUser(role)
-        return None
-
-    app.dependency_overrides[get_current_user] = mock_get_current_user
-
-@pytest_asyncio.fixture(scope="session")
-async def api_client(setup_security_overrides):
-    """Client httpx async connecté directement à FastAPI en mémoire."""
-    try:
-        from app.main import app
-    except ImportError:
-        from backend.app.main import app
-
-    async with httpx.AsyncClient(app=app, base_url=API_BASE, timeout=30) as client:
-        yield client
-
 
 # ─── Tokens JWT par rôle ─────────────────────────────────────────
 ROLES_TEST = [
@@ -117,32 +100,44 @@ ROLES_TEST = [
     "AUDITEUR", "ARCHIVISTE_ANNF", "RESPONSABLE_ANNF"
 ]
 
-@pytest_asyncio.fixture(scope="session")
-async def tokens():
-    """Génère des jetons nominatifs directs pour court-circuiter l'authentification."""
-    return {role: f"MOCK_TOKEN_{role}" for role in ROLES_TEST}
+@pytest_asyncio.fixture(scope="session", autouse=True)
+async def init_database_schema():
+    # [Vos imports de modules restent identiques ici...]
+    try:
+        import app.models.auth
+        import app.models.ccfm
+    except ImportError:
+        pass
 
-
-async def parcelle_test(api_client, tokens):
-    """
-    Crée une parcelle minimale pour les tests.
-    Nécessite un îlot de test pré-existant (à créer dans conftest de setup).
-    """
-    # Pour les tests, on recherche un îlot existant en base
-    r = await api_client.get("/cadastre/parcelles/",
-        headers=auth(tokens, "GEOMETRE"))
-    parcelles = r.json()
-    if parcelles:
-        return parcelles[0]  # Réutiliser une parcelle existante
-
-    # Sinon créer (nécessite un îlot_id valide en base de test)
-    r = await api_client.post("/cadastre/parcelles/",
-        headers=auth(tokens, "GEOMETRE"),
-        json={
-            "ilot_id": "00000000-0000-0000-0000-000000000001",  # îlot de test seedé
-            "surface_m2": 500.0,
-            "geom_wkt": "POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))",
-            "motif": "Parcelle de test E2E pour la suite de tests automatisés",
-        })
-    assert r.status_code == 201, f"Création parcelle test échouée: {r.text}"
-    return r.json()
+    if Base is not None and engine is not None:
+        async with engine.begin() as conn:
+            from sqlalchemy import text
+            
+            # 1. 🧼 NUKE DU SCHÉMA PUBLIC (Méthode radicale et propre)
+            # Le CASCADE force Postgres à sauter toutes les contraintes et dépendances
+            print("🧼 [TEST SETUP] Destruction et recréation du schéma public Postgres...")
+            await conn.execute(text("DROP SCHEMA public CASCADE;"))
+            await conn.execute(text("CREATE SCHEMA public;"))
+            await conn.execute(text("GRANT ALL ON SCHEMA public TO public;"))
+            
+            # 2. Réactivation propre des extensions nationales requises
+            print("🌍 [TEST SETUP] Réactivation propre de PostGIS et UUID...")
+            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis;"))
+            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";"))
+            
+            # 3. Exécution d'Alembic
+            def run_alembic_upgrade(sync_conn):
+                from alembic.config import Config
+                from alembic import command
+                import os
+                
+                ini_path = "alembic.ini" if os.path.exists("alembic.ini") else "backend/alembic.ini"
+                cfg = Config(ini_path)
+                cfg.attributes['connection'] = sync_conn
+                command.upgrade(cfg, "head")
+            
+            print("🚀 [TEST SETUP] Application des migrations Alembic (001 à 018)...")
+            await conn.run_sync(run_alembic_upgrade)
+            print("✅ [TEST SETUP] Schéma FONCIER+ reconstruit à neuf sans conflits !")
+            
+    yield

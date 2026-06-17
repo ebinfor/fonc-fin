@@ -31,9 +31,9 @@ async def seed_data():
                     id VARCHAR(36) PRIMARY KEY,
                     name VARCHAR(255),
                     email VARCHAR(255) UNIQUE,
-                    hashed_password VARCHAR(255),
+                    password_hash VARCHAR(255),
                     role VARCHAR(50),
-                    is_active BOOLEAN DEFAULT TRUE,
+                    actif BOOLEAN DEFAULT TRUE,
                     region VARCHAR(10)
                 );
             """))
@@ -41,10 +41,10 @@ async def seed_data():
             await session.execute(text("""
                 CREATE TABLE IF NOT EXISTS workflow_step_def (
                     id VARCHAR(36) PRIMARY KEY,
-                    workflow_code VARCHAR(50),
+                    definition_id VARCHAR(50),
                     code_etape VARCHAR(50),
                     ordre INTEGER,
-                    attendu_de_role VARCHAR(50),
+                    role_requis VARCHAR(50),
                     role_backup VARCHAR(50),
                     description TEXT
                 );
@@ -63,8 +63,8 @@ async def seed_data():
                 print("👤 Création du compte administrateur initial...")
                 await session.execute(
                     text("""
-                        INSERT INTO users (id, name, email, hashed_password, role, is_active, region)
-                        VALUES (:id, :name, :email, :password, :role, :is_active, :region)
+                        INSERT INTO users (id, name, email, password_hash, role, actif, region)
+                        VALUES (:id, :name, :email, :password, :role, :actif, :region)
                     """),
                     {
                         "id": "00000000-0000-0000-0000-000000000001",
@@ -72,7 +72,7 @@ async def seed_data():
                         "email": "admin@test.foncier.ne",
                         "password": "supersecretpasswordhash",
                         "role": "ADMIN",
-                        "is_active": True,
+                        "actif": True,
                         "region": "NIA"
                     }
                 )
@@ -81,39 +81,60 @@ async def seed_data():
                 print(f"ℹ️ Utilisateur ADMIN déjà présent (ID: {user[0]}).")
 
             # ─── 3. INJECTION DES ÉTAPES DU WORKFLOW RNAF ───────────────────
-            print("📑 Injection des règles du moteur de workflow (RNAF)...")
+            
+            # ─── 2.5 INJECTION DE LA DÉFINITION DU WORKFLOW (PARENT) ───────
+            print("📑 Création du workflow parent RNAF...")
+            rnaf_uuid = "de305d54-75b4-431b-adb2-eb6b9e546013"
+            res_wf = await session.execute(
+                text("SELECT id FROM workflow_definition WHERE type_workflow = :type"),
+                {"type": "RNAF"}
+            )
+            if not res_wf.fetchone():
+                await session.execute(
+                    text("INSERT INTO workflow_definition (id, type_workflow, nom, description, is_active, version) VALUES (:id, 'RNAF', 'Régularisation Nationale des Actes Fonciers', 'Moteur de règles RNAF', true, 1)"),
+                    {"id": rnaf_uuid}
+                )
+                await session.commit()
+                print("✅ Workflow parent RNAF créé !")
+            else:
+                print("✅ Workflow parent RNAF existe déjà.")
+
+            print("📑 Injection des étapes du moteur de workflow (RNAF)...")
             
             steps = [
                 {
                     "id": str(uuid.uuid4()),
-                    "workflow_code": "RNAF",
+                    "definition_id": "de305d54-75b4-431b-adb2-eb6b9e546013",
                     "code_etape": "EN_INSTRUCTION",
                     "ordre": 1,
-                    "attendu_de_role": "AGENT_CCFM",
+                    "role_requis": "AGENT_CCFM",
                     "role_backup": "CHEF_CCFM",
                     "description": "Vérification des pièces de l'arrêté foncier transmis."
                 },
                 {
                     "id": str(uuid.uuid4()),
-                    "workflow_code": "RNAF",
+                    "definition_id": "de305d54-75b4-431b-adb2-eb6b9e546013",
                     "code_etape": "PUBLIE",
                     "ordre": 2,
-                    "attendu_de_role": "EDITEUR_JO",
+                    "role_requis": "EDITEUR_JO",
                     "role_backup": "ADMIN",
                     "description": "Insertion et publication officielle au Journal Officiel."
                 }
             ]
             
             for step in steps:
+                step['nom_etape'] = step.get('nom_etape', step['code_etape'].replace('_', ' ').title())
+                step['type_validation'] = step.get('type_validation', 'APPROBATION')
+                step['est_obligatoire'] = step.get('est_obligatoire', True)
                 res_step = await session.execute(
-                    text("SELECT id FROM workflow_step_def WHERE workflow_code = :w_code AND code_etape = :c_etape"),
-                    {"w_code": step["workflow_code"], "c_etape": step["code_etape"]}
+                    text("SELECT id FROM workflow_step_def WHERE definition_id = :w_code AND code_etape = :c_etape"),
+                    {"w_code": step["definition_id"], "c_etape": step["code_etape"]}
                 )
                 if not res_step.fetchone():
                     await session.execute(
                         text("""
-                            INSERT INTO workflow_step_def (id, workflow_code, code_etape, ordre, attendu_de_role, role_backup, description)
-                            VALUES (:id, :workflow_code, :code_etape, :ordre, :attendu_de_role, :role_backup, :description)
+                            INSERT INTO workflow_step_def (id, definition_id, code_etape, nom_etape, ordre, role_requis, role_backup, description, type_validation, est_obligatoire)
+                            VALUES (:id, :definition_id, :code_etape, :nom_etape, :ordre, :role_requis, :role_backup, :description, :type_validation, :est_obligatoire)
                         """),
                         step
                     )

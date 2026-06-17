@@ -6,7 +6,8 @@ NUS format    : NUS-AAAA-NNNNN    (ex: NUS-2026-00089)
 REF CCFM      : CCFM/AAAA/MM/NNNN (ex: CCFM/2026/02/0089)
 """
 import enum, uuid
-from sqlalchemy import Boolean, Column, Date, DateTime, Numeric, String, Text, ForeignKey
+# AJOUT : "text" a été ajouté aux imports ci-dessous
+from sqlalchemy import Boolean, Column, Date, DateTime, Numeric, String, Text, ForeignKey, text
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.sql import func
 from app.core.database import Base
@@ -121,7 +122,7 @@ class CCFMDemande(Base):
     def est_valide(self) -> bool:
         return self.etat in ETATS_CCFM_VALIDES
 
-    def acteur_responsable(self) -> str:
+    def actor_responsable(self) -> str:
         return ACTEUR_PAR_ETAT.get(self.etat, "AUCUN")
 
 
@@ -167,7 +168,8 @@ class FicheConstatCCFM(Base):
     topographe_nom         = Column(Text, nullable=False)
     topographe_fonction    = Column(Text, server_default="Topographe agree")
     topographe_id          = Column(Text)
-    photos_terrain         = Column(JSONB, server_default="'[]'")
+    # CORRECTION : La syntaxe ci-dessous est désormais interprétée de façon sécurisée
+    photos_terrain         = Column(JSONB, server_default=text("'[]'::jsonb"))
     hash_fiche             = Column(String(64))
     created_at             = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -190,8 +192,8 @@ class RapportAppreciationCCFM(Base):
     decision_topographe     = Column(String(20))
     observations_topographe = Column(Text)
     verdict_global          = Column(String(20), nullable=False)
-    points_conformite       = Column(JSONB, server_default="'[]'")
-    anomalies_detectees     = Column(JSONB, server_default="'[]'")
+    points_conformite       = Column(JSONB, server_default=text("'[]'::jsonb"))
+    anomalies_detectees     = Column(JSONB, server_default=text("'[]'::jsonb"))
     rapport_hash            = Column(String(64))
     created_at              = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -206,5 +208,6 @@ class HistoriqueCCFM(Base):
     commentaire     = Column(Text)
     effectue_par    = Column(Text)
     role_effectueur = Column(String(50))
-    metadata        = Column(JSONB)
+    # CORRECTION : Renommé de "metadata" en "meta_data" pour éliminer le conflit d'attribut SQLAlchemy
+    meta_data       = Column(JSONB)
     created_at      = Column(DateTime(timezone=True), server_default=func.now())

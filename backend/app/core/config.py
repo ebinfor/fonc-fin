@@ -23,14 +23,22 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "FONCIER+"
     DATABASE_URL: str = _raw_url
     JWT_SECRET: str = os.getenv("JWT_SECRET", "fb3a7c82d901b4e5f6e7890123456789a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6")
+    
+    # Détection de l'environnement Railway
+    ENVIRONMENT: str = os.getenv("RAILWAY_ENVIRONMENT", "development")
+
+    # Propriété dynamique attendue par main.py
+    @property
+    def is_production(self) -> bool:
+        return self.ENVIRONMENT == "production"
 
     class Config:
         env_file = ".env"
         extra = "ignore"
 
-# Instanciation globale requise par les endpoints (auth, monitoring, etc.)
+# Instanciation globale requise par les endpoints
 settings = Settings()
 
-# 🚀 Fonction de compatibilité requise par main.py et les dépendances FastAPI
+# Fonction de compatibilité requise par main.py et les dépendances FastAPI
 def get_settings() -> Settings:
     return settings

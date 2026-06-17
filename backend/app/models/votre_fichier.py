@@ -1,0 +1,1 @@
+photos_terrain = Column(JSONB, server_default="'[]'")

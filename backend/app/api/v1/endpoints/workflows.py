@@ -86,6 +86,7 @@ async def demarrer_workflow(
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
     except Exception as e:
         await db.rollback()
+        import traceback; traceback.print_exc()
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Erreur interne moteur: {str(e)}")
         
     # Tâche de fond pour recalculer les SLA sans bloquer la réponse

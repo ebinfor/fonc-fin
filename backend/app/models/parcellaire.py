@@ -435,10 +435,10 @@ class ConflitParcellaire(Base):
     traite_at = Column(DateTime(timezone=True))
 
     # Relations
+   # Relations
     parcelle_a = relationship("Parcelle", foreign_keys=[parcelle_a_id])
-    parcelle_b = relationship("Parcelle", foreign_keys=[parcelle_b_id])
+    parcelle_b = relationship("Parcelle", foreign_keys=[parcelle_b_id], overlaps="conflits_b")
     traiteur = relationship("User", foreign_keys=[traite_par])
-
     def __repr__(self):
         return f"<ConflitParcellaire {self.type_conflit} — {self.gravite}>"
 

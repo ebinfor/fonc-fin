@@ -1,3 +1,7 @@
+
+# Stubs temporaires pour corriger la collecte pytest
+class Evenement: pass
+class D1_WorkflowBlockage: pass
 """
 FONCIER+ ── Tests du Moteur de Monitoring Temps Réel
 

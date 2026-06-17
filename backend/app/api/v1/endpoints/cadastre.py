@@ -37,18 +37,22 @@ class NicadOut(BaseModel):
     region: Optional[str]=None; statut: Optional[str]=None
     class Config: from_attributes=True
 
-@router.get("/tableau-de-bord", response_model=list,
-    summary="Liste tableau de bord")
+@router.get("/tableau-de-bord", response_model=dict,
+            summary="Liste tableau de bord")
 async def tableau_de_bord_cadastre(
     db: AsyncSession = Depends(get_db),
     current_user=Depends(require_role(ROLES_DIR + ["CHEF_SERVICE_CADASTRE"])),
 ):
     stats = {}
+    
+    # 1. Statistiques des Parcelles
     try:
         r = await db.execute(text("SELECT statut, COUNT(*) nb FROM parcelles GROUP BY statut"))
         stats["parcelles"] = {row.statut: row.nb for row in r}
     except Exception:
         stats["parcelles"] = {}
+        
+    # 2. Statistiques des Conflits
     try:
         r = await db.execute(text(
             "SELECT gravite, COUNT(*) nb FROM conflits_parcellaires WHERE statut='ouvert' GROUP BY gravite"
@@ -56,6 +60,8 @@ async def tableau_de_bord_cadastre(
         stats["conflits_ouverts"] = {row.gravite: row.nb for row in r}
     except Exception:
         stats["conflits_ouverts"] = {}
+        
+    # 3. Statistiques du Registre NICAD
     try:
         r = await db.execute(text(
             "SELECT COUNT(*) FROM nicad_registry WHERE created_at >= date_trunc('month',CURRENT_DATE)"
@@ -63,6 +69,8 @@ async def tableau_de_bord_cadastre(
         stats["nicad_ce_mois"] = r.scalar() or 0
     except Exception:
         stats["nicad_ce_mois"] = 0
+        
+    # 4. Statistiques des Workflows RNP
     try:
         r = await db.execute(text(
             "SELECT COUNT(*) FROM workflow_instance wi JOIN workflow_definition wd ON wd.id=wi.definition_id"
@@ -71,11 +79,14 @@ async def tableau_de_bord_cadastre(
         stats["wf_rnp_en_cours"] = r.scalar() or 0
     except Exception:
         stats["wf_rnp_en_cours"] = 0
-    return {"acteur": current_user.email, "role": current_user.role,
-            "module": "Cadastre", "stats": stats,
-            "horodatage": datetime.now(timezone.utc).isoformat()}
 
-
+    # Retour final de l'objet
+    return {
+        "acteur": current_user.id,
+        "role": current_user.role,
+        "module": "Cadastre",
+        "stats": stats
+    }
 @router.post("/parcelles/{parcelle_id}/valider")
 async def valider_parcelle(
     parcelle_id: str,
@@ -111,7 +122,7 @@ async def valider_parcelle(
     parcelle.updated_at = datetime.now(timezone.utc)
     await db.commit()
     return {"parcelle_id": parcelle_id, "nicad": parcelle.nicad, "statut": "ACTIVE",
-            "valide_par": current_user.email}
+            "valide_par": current_user.id}
 
 
 @router.get("/nicad/registre", response_model=list,
@@ -223,7 +234,7 @@ async def resoudre_conflit(
         )
     await db.commit()
     return {"conflit_id": conflit_id, "statut": conflit.statut,
-            "decision": payload.decision, "traite_par": current_user.email}
+            "decision": payload.decision, "traite_par": current_user.id}
 
 
 @router.get("/conflits", response_model=list,
@@ -625,7 +636,7 @@ async def archiver_vers_annf_cadastre(
         "entite_table": entite_table,
         "module_source": "cadastre",
         "type_document": type_document,
-        "archive_par": current_user.email,
+        "archive_par": current_user.id,
     }
     try:
         archive = await ANNFArchiveService.archiver(

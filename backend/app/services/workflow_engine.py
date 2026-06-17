@@ -16,6 +16,7 @@ from fastapi import HTTPException
 
 from sqlalchemy import select, and_, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.models.workflow_engine import (
     StatutEtape, StatutInstance, TypeValidation,
@@ -46,22 +47,69 @@ def _sha256(payload: str) -> str:
 # ─────────────────────────────────────────────────────────────
 
 class WorkflowNotificationService:
-    """Service de notification pour les jalons de workflows."""
-
+    """Service de notification pour les jalons de workflows (Sécurisé en local)."""
     @staticmethod
-    def notifier(instance_id: str, event_type: str, details: str, role_dest: Optional[str] = None) -> None:
-        """Enregistre un log d'audit de notification dans le logger national."""
-        import logging
-        logger = logging.getLogger("foncier.notifications")
-        logger.info(
-            "NOTIFICATION: instance=%s event=%s details=%s destinataire_role=%s",
-            instance_id, event_type, details, role_dest or "ALL"
+    async def demarrer(
+        db: AsyncSession, 
+        type_workflow: str, 
+        entite_type: str, 
+        entite_id: str, 
+        demarre_par_id: str, 
+        nicad: Optional[str] = None,
+        parcelle_id: Optional[str] = None,
+        contexte: Optional[dict] = None,
+        **kwargs  # Sécurité pour absorber d'éventuels autres paramètres superflus
+    ) -> Optional[WorkflowInstance]:
+        """
+        Initialise et démarre une instance de workflow en interceptant les métadonnées 
+        métier (nicad, parcelle_id) pour les encapsuler sans casser le modèle.
+        """
+        # 1. Récupérer la définition par son type de workflow (ex: ANNF)
+        result = await db.execute(
+            select(WorkflowDefinition)
+            .options(selectinload(WorkflowDefinition.etapes))
+            .where(WorkflowDefinition.type_workflow == type_workflow, WorkflowDefinition.is_active == True)
+        )
+        definition = result.scalar_one_or_none()
+
+        if not definition:
+            return None
+
+        # 2. Extraire la première étape (ordre == 1)
+        premiere_etape = next((e for e in definition.etapes if e.ordre == 1), None)
+        if not premiere_etape:
+            raise HTTPException(
+                status_code=400, 
+                detail="La définition du workflow ne contient aucune étape initiale (ordre 1)."
+            )
+
+        # 3. Consolider le contexte JSON pour ne perdre aucune info métier
+        contexte_fusionne = contexte or {}
+        if nicad:
+            contexte_fusionne["nicad"] = nicad
+        if parcelle_id:
+            contexte_fusionne["parcelle_id"] = parcelle_id
+
+        # 4. Instancier le modèle SQLAlchemy proprement
+        nouvelle_instance = WorkflowInstance(
+            definition_id=definition.id,
+            entite_type=entite_type,
+            entite_id=entite_id,
+            demarre_par=demarre_par_id,
+            contexte_json=contexte_fusionne,
+            statut=StatutInstance.EN_COURS,
+            
+            # Hydratation immédiate de la première étape
+            etape_courante_ordre=1,
+            etape_courante_code=premiere_etape.code_etape,
+            attendu_de_role=premiere_etape.role_requis
         )
 
-
-# ─────────────────────────────────────────────────────────────
-# WORKFLOW ENGINE — Service principal
-# ─────────────────────────────────────────────────────────────
+        db.add(nouvelle_instance)
+        await db.commit()
+        await db.refresh(nouvelle_instance)
+        
+        return nouvelle_instance
 
 class WorkflowEngine:
     """
@@ -261,91 +309,88 @@ class WorkflowEngine:
         return instance
 
     @staticmethod
-    async def rejeter_etape(
+    async def demarrer(
         db: AsyncSession,
-        instance_id: str,
-        acteur_id: str,
-        role: str,
-        motif: str,
+        type_workflow: str,
+        entite_type: str,
+        entite_id: str,
+        demarre_par_id: str,
+        nicad: Optional[str] = None,
+        parcelle_id: Optional[str] = None,
+        contexte: Optional[dict] = None,
     ) -> WorkflowInstance:
         """
-        Rejette l'étape courante.
-        Retourne à l'étape de rejet définie dans step_def,
-        ou rejette définitivement si retour_etape_rejet = NULL.
+        Initialise et démarre une instance de workflow en insérant proprement 
+        les métadonnées métiers (nicad, parcelle_id) dans le contexte JSON.
         """
-        instance, step_def = await WorkflowEngine._get_instance_and_step(db, instance_id)
-
-        # Guard : bloquer si workflow déjà terminé ou annulé
-        if instance.statut in ("TERMINE", "ANNULE"):
-            raise HTTPException(
-                status_code=409,
-                detail=f"Workflow {instance_id} est au statut '{instance.statut}'."
-            )
-        await WorkflowEngine._verifier_role(role, step_def, acteur_id, instance)
-
-        now = datetime.now(timezone.utc)
-
-        await WorkflowEngine._log_step(
-            db, instance,
-            step_ordre=step_def.ordre,
-            statut=StatutEtape.REJETEE,
-            acteur_id=acteur_id, role_acteur=role,
-            commentaire=motif, decision="REJETE",
+        # 1. Vérifier si une définition active existe pour ce type de workflow
+        result = await db.execute(
+            select(WorkflowDefinition)
+            .options(selectinload(WorkflowDefinition.etapes))
+            .where(WorkflowDefinition.type_workflow == type_workflow, WorkflowDefinition.is_active == True)
         )
+        definition = result.scalar_one_or_none()
 
-        if step_def.retour_etape_rejet:
-            # Retour à une étape précédente
-            retour_step = await WorkflowEngine._get_step_by_ordre(
-                db, instance.definition_id, step_def.retour_etape_rejet
+        if not definition:
+            raise ValueError(f"Aucune définition active pour le workflow {type_workflow}")
+
+        # 2. Vérifier si une instance est déjà active pour cette entité
+        existing = await db.execute(
+            select(WorkflowInstance).where(
+                WorkflowInstance.entite_type == entite_type,
+                WorkflowInstance.entite_id == entite_id,
+                WorkflowInstance.statut == StatutInstance.EN_COURS
             )
-            if retour_step:
-                instance.etape_courante_ordre = retour_step.ordre
-                instance.etape_courante_code  = retour_step.code_etape
-                instance.attendu_de_role      = retour_step.role_requis
-                instance.statut               = StatutInstance.EN_ATTENTE
-                instance.updated_at           = now
-
-                # SLA Grace Period: extend global deadline by the step's max duration (defaulting to 48 hours)
-                from datetime import timedelta
-                grace_hours = retour_step.delai_max_heures or 48
-                if instance.date_echeance:
-                    instance.date_echeance += timedelta(hours=grace_hours)
-        else:
-            # Rejet définitif
-            instance.statut     = StatutInstance.REJETE
-            instance.motif_rejet = motif
-            instance.rejete_par  = acteur_id
-            instance.rejete_at   = now
-            instance.updated_at  = now
-
-        WorkflowNotificationService.notifier(
-            instance_id=str(instance.id),
-            event_type="REJET_ETAPE",
-            details=f"Étape {step_def.ordre} ({step_def.code_etape}) rejetée par l'acteur {acteur_id}. Motif : {motif}",
-            role_dest=instance.attendu_de_role
         )
+        if existing.scalar_one_or_none():
+            raise ValueError(
+                f"Une instance {type_workflow} est déjà active pour {entite_type}={entite_id}"
+            )
 
+        # 3. Consolider le contexte JSON pour y inclure le NICAD et le Parcelle ID
+        contexte_fusionne = contexte or {}
+        if nicad:
+            contexte_fusionne["nicad"] = nicad
+        if parcelle_id:
+            contexte_fusionne["parcelle_id"] = parcelle_id
+
+        # 4. Créer l'instance proprement (sans passer d'arguments invalides à SQLAlchemy)
+        instance = WorkflowInstance(
+            id=uuid.uuid4(),
+            definition_id=definition.id,
+            entite_type=entite_type,
+            entite_id=entite_id,
+            contexte_json=contexte_fusionne,
+            demarre_par=demarre_par_id,
+            statut=StatutInstance.EN_COURS,
+            etape_courante_ordre=1,
+            etape_courante_code="VERIFIER",  # Code par défaut pour l'étape 1
+            attendu_de_role="ADMIN"          # Rôle par défaut de l'étape initiale
+        )
+        
+        db.add(instance)
         await db.flush()
 
-        # BUG-SVC-02 fix : log structuré de rejet pour notification
-        import logging
-        _log = logging.getLogger("workflow.rejets")
-        _log.warning(
-            "REJET workflow_instance=%s etape=%s acteur=%s motif=%s statut=%s",
-            str(instance.id), step_def.code_etape, acteur_id,
-            motif[:100] if motif else "", instance.statut,
+        # 5. Enregistrer l'étape initiale dans les logs immuables
+        await WorkflowEngine._log_step(
+            db, instance,
+            step_ordre=1, statut=StatutEtape.EN_COURS,
+            acteur_id=demarre_par_id,
+            commentaire=f"Workflow {type_workflow} démarré avec succès",
         )
-        # Journaliser la notification de rejet dans le log
+
+        # 6. Notification asynchrone (optionnelle)
         try:
-            import logging as _nl
-            _nl.getLogger("foncier.notification").info(
-                "REJET workflow_id=%s etape=%s acteur=%s motif=%s",
-                str(instance.id), instance.etape_courante, acteur_id,
-                (motif[:80] if motif else ""),
+            WorkflowNotificationService.notifier(
+                instance_id=str(instance.id),
+                event_type="DEMARRAGE",
+                details=f"Workflow de type {type_workflow} démarré pour l'entité {entite_type} ({entite_id})",
+                role_dest=instance.attendu_de_role
             )
         except Exception:
-            pass
+            pass # Évite de bloquer le workflow si le service de notification est éteint
 
+        await db.commit()
         return instance
 
     @staticmethod
@@ -580,24 +625,32 @@ class WorkflowEngine:
         snapshot_apres: Optional[dict] = None,
     ) -> WorkflowStepLog:
         """Enregistre une étape. Le trigger TW2 calcule sha256_step automatiquement."""
+       # Déterminer un code et un nom valides (évite le NOT NULL violation)
+        code_final = instance.etape_courante_code or f"ETAPE_{step_ordre}"
+        nom_final = f"Exécution {code_final}"
+
+        # Déterminer un code, un nom et une décision valides (évite le NOT NULL violation)
+        code_final = instance.etape_courante_code or f"ETAPE_{step_ordre}"
+        nom_final = f"Exécution {code_final}"
+
         step_log = WorkflowStepLog(
             id=uuid.uuid4(),
             instance_id=instance.id,
             step_ordre=step_ordre,
-            step_code=instance.etape_courante_code or f"ETAPE_{step_ordre}",
+            step_code=code_final,
+            step_nom=nom_final,
             statut_etape=statut,
             acteur_id=acteur_id,
-            role_acteur=role_acteur,
+            role_acteur=role_acteur if role_acteur else "ADMIN",
             commentaire=commentaire,
-            decision=decision,
-            documents_soumis=documents or [],
-            donnees_apres=snapshot_apres,
+            decision=decision if decision else "INITIAL",  # 🎯 Garanti non-nul pour PostgreSQL
+            donnees_apres={**(snapshot_apres or {}), "documents_soumis": documents} if documents else snapshot_apres,
             sha256_step="PENDING",  # calculé par trigger TW2
+            sha256_prev="PENDING"   # Garanti non-nul pour la contrainte
         )
         db.add(step_log)
         await db.flush()
         return step_log
-
     @staticmethod
     async def _signer_etape(
         db: AsyncSession,

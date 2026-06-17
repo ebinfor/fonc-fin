@@ -44,15 +44,46 @@ def do_run_migrations(connection):
         include_object=include_object
     )
 
-    # Intercepter et neutraliser le SQL brut de type 'CREATE EXTENSION'
-   # Intercepter et neutraliser le SQL brut incompatible avec SQLite
+    # Intercepter et neutraliser le SQL brut incompatible avec SQLite
     orig_execute = connection.execute
     def sqlite_safe_execute(statement, *args, **kwargs):
-        stmt_str = str(statement).lower()
-        # On bloque les extensions, les blocs DO $$ et les déclarations de TYPE ENUM
-        if connection.dialect.name == "sqlite" and any(x in stmt_str for x in ["extension", "postgis", "do $$", "create type"]):
-            from sqlalchemy import text
-            return orig_execute(text("SELECT 1;"), *args, **kwargs)
+        # 🔥 PROTECTION : On n'applique le filtre de chaîne que sur un dialecte SQLite
+        if connection.dialect.name == "sqlite":
+            stmt_str = str(statement).lower()
+            if any(x in stmt_str for x in ["extension", "postgis", "do $$", "create type"]):
+                from sqlalchemy import text
+                return orig_execute(text("SELECT 1;"), *args, **kwargs)
+        
+        # Exécution directe et native pour PostgreSQL (asyncpg)
         return orig_execute(statement, *args, **kwargs)
     
     connection.execute = sqlite_safe_execute
+
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+async def run_migrations_online() -> None:
+    """Mode Online standard (utilisé hors des tests : Dev / Production)."""
+    connectable = async_engine_from_config(
+        config.get_section(config.config_ini_section, {}),
+        prefix="sqlalchemy.",
+        poolclass=pool.NullPool,
+    )
+
+    async with connectable.connect() as connection:
+        await connection.run_sync(do_run_migrations)
+
+    await connectable.dispose()
+
+
+# ─── Point d'entrée de dispatch d'Alembic ────────────────────────────
+if context.is_offline_mode():
+    run_migrations_offline()
+else:
+    # Si conftest injecte une connexion de test, on évite asyncio.run()
+    test_connection = config.attributes.get("connection", None)
+    if test_connection is not None:
+        do_run_migrations(test_connection)
+    else:
+        asyncio.run(run_migrations_online())
