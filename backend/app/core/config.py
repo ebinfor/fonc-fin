@@ -16,7 +16,7 @@ os.environ["DATABASE_URL"] = _raw_url
 try:
     from pydantic_settings import BaseSettings
 except ImportError:
-    from pydantic import BaseSettings
+    from pydantic_settings import BaseSettings
 
 # 3. Définition de la configuration globale de l'application
 class Settings(BaseSettings):
